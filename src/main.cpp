@@ -213,7 +213,7 @@ bool receive(Message& message) {
 bool transmit(const Message& message) {
     Frame frame;
     if (!encode(key, message, frame)) {
-        radioFault(RADIOLIB_ERR_INVALID_PACKET_LENGTH);
+        radioFault(RADIOLIB_ERR_UNKNOWN);
         return false;
     }
     const int16_t status = radio.transmit(frame.data(), frame.size());
