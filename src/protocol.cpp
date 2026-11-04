@@ -148,6 +148,34 @@ bool parseKey(const char* hex, Key& key) {
     return true;
 }
 
+bool validIdentity(Role role, Identity identity) {
+    switch (role) {
+        case Role::Base:
+            return identity.id == 0 && identity.route == 0;
+        case Role::Node:
+            return identity.id >= 1 && identity.id <= MaxNodes && identity.route == 0;
+        case Role::Rover:
+            return identity.id >= 1 && identity.id <= MaxRovers && identity.route <= MaxNodes;
+    }
+    return false;
+}
+
+bool parseConfig(const char* line, Role role, Identity& identity, Key& key) {
+    if (std::strlen(line) != 74 || std::strncmp(line, "CFG ", 4) != 0 ||
+        line[4] != static_cast<char>(role) || line[5] != ' ' || line[7] != ' ' ||
+        line[9] != ' ') {
+        return false;
+    }
+    Identity next;
+    next.id = static_cast<uint8_t>(line[6] - '0');
+    next.route = static_cast<uint8_t>(line[8] - '0');
+    if (!validIdentity(role, next) || !parseKey(line + 10, key)) {
+        return false;
+    }
+    identity = next;
+    return true;
+}
+
 Arrival classify(const Report& incoming, const Report& stored) {
     if (!incoming.sequence || incoming.kind == Kind::Ack ||
         (stored.sequence && incoming.rover != stored.rover) || incoming.sequence < stored.sequence) {

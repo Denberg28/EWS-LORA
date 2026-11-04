@@ -29,9 +29,9 @@ The firmware uses 916.0 MHz, 10 dBm conducted power, SF8 and 125 kHz bandwidth. 
 
    ```sh
    python scripts/provision.py ews-network.key --generate
-   python scripts/provision.py ews-network.key --port COM5 --id 0
-   python scripts/provision.py ews-network.key --port COM6 --id 1
-   python scripts/provision.py ews-network.key --port COM7 --id 1 --via 1
+   python scripts/provision.py ews-network.key --port COM5 --role base --id 0
+   python scripts/provision.py ews-network.key --port COM6 --role node --id 1
+   python scripts/provision.py ews-network.key --port COM7 --role rover --id 1 --via 1
    ```
 
    This example routes Rover 1 through Node 1. For a direct Rover, set `--via 0` or omit it. For another Node or Rover, flash the same role image and choose an unused ID within that role. Label each board with its role, ID and route.

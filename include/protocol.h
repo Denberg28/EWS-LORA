@@ -23,6 +23,12 @@ using Frame = std::array<uint8_t, FrameSize>;
 
 enum class Kind : uint8_t { Sos = 1, Clear = 2, Ack = 3 };
 enum class Mode : uint8_t { Idle, Sos, Clear };
+enum class Role : uint8_t { Base = 'B', Node = 'N', Rover = 'R' };
+
+struct Identity {
+    uint8_t id = 0;
+    uint8_t route = 0;
+};
 
 struct Report {
     Kind kind = Kind::Sos;
@@ -47,6 +53,8 @@ bool decodeReport(const uint8_t* in, Report& report);
 bool encode(const Key& key, const Message& message, Frame& frame);
 bool decode(const Key& key, const uint8_t* data, size_t length, Message& message);
 bool parseKey(const char* hex, Key& key);
+bool validIdentity(Role role, Identity identity);
+bool parseConfig(const char* line, Role role, Identity& identity, Key& key);
 
 enum class Arrival { Reject, Duplicate, New };
 Arrival classify(const Report& incoming, const Report& stored);

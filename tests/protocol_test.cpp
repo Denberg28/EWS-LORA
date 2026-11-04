@@ -12,6 +12,16 @@ int main() {
     assert(!parseKey("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1ez", key));
     assert(!parseKey("123", key));
 
+    Identity identity;
+    const char* roverConfig = "CFG R 4 2 000102030405060708090a0b0c0d0e0f"
+                              "101112131415161718191a1b1c1d1e1f";
+    assert(parseConfig(roverConfig, Role::Rover, identity, key));
+    assert(identity.id == 4 && identity.route == 2);
+    assert(!parseConfig(roverConfig, Role::Node, identity, key));
+    assert(!parseConfig("CFG N 4 0 short", Role::Node, identity, key));
+    identity.id = 9;
+    assert(!validIdentity(Role::Rover, identity));
+
     Message sos;
     sos.report.sequence = 1;
     sos.report.rover = 1;

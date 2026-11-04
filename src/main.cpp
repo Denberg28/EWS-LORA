@@ -33,8 +33,15 @@ constexpr uint32_t AckWindowMs = RelayWindowMs;
 constexpr uint32_t BaseTxGapMs = 18000;
 constexpr uint32_t FixMaxAgeMs = 10000;
 
-uint8_t deviceId = 0;
-uint8_t routeId = 0;
+#if defined(EWS_ROVER)
+constexpr Role DeviceRole = Role::Rover;
+#elif defined(EWS_NODE)
+constexpr Role DeviceRole = Role::Node;
+#else
+constexpr Role DeviceRole = Role::Base;
+#endif
+
+Identity identity;
 
 Preferences store;
 Key key{};
@@ -106,32 +113,26 @@ void setStoreFault() {
     Serial.println("STORE ERROR");
 }
 
-bool validIdentity(uint8_t id, uint8_t route) {
-#if defined(EWS_ROVER)
-    return id >= 1 && id <= MaxRovers && route <= MaxNodes;
-#elif defined(EWS_NODE)
-    return id >= 1 && id <= MaxNodes && route == 0;
-#else
-    return id == 0 && route == 0;
-#endif
-}
-
 bool loadConfig() {
     if (!store.isKey("config")) {
         return false;
     }
-    uint8_t bytes[KeySize + 2];
+    uint8_t bytes[KeySize + 3];
     if (store.getBytesLength("config") != sizeof(bytes) ||
         store.getBytes("config", bytes, sizeof(bytes)) != sizeof(bytes) ||
-        !validIdentity(bytes[0], bytes[1])) {
+        bytes[0] != static_cast<uint8_t>(DeviceRole)) {
         setStoreFault();
         return false;
     }
-    deviceId = bytes[0];
-    routeId = bytes[1];
+    identity.id = bytes[1];
+    identity.route = bytes[2];
+    if (!validIdentity(DeviceRole, identity)) {
+        setStoreFault();
+        return false;
+    }
     uint8_t bits = 0;
     for (size_t i = 0; i < key.size(); ++i) {
-        key[i] = bytes[i + 2];
+        key[i] = bytes[i + 3];
         bits |= key[i];
     }
     if (!bits) {
@@ -141,7 +142,7 @@ bool loadConfig() {
 }
 
 void provision() {
-    static char line[73];
+    static char line[75];
     static size_t size = 0;
     static bool overflow = false;
     for (unsigned i = 0; i < 96 && Serial.available(); ++i) {
@@ -155,11 +156,8 @@ void provision() {
             continue;
         }
         line[size] = '\0';
-        const uint8_t id = static_cast<uint8_t>(line[4] - '0');
-        const uint8_t route = static_cast<uint8_t>(line[6] - '0');
-        const bool valid = !overflow && size == 72 && std::strncmp(line, "CFG ", 4) == 0 &&
-                           line[5] == ' ' && line[7] == ' ' && validIdentity(id, route) &&
-                           parseKey(line + 8, key);
+        Identity config;
+        const bool valid = !overflow && size == 74 && parseConfig(line, DeviceRole, config, key);
         memset(line, 0, sizeof(line));
         size = 0;
         overflow = false;
@@ -167,8 +165,8 @@ void provision() {
             Serial.println("INVALID CONFIG");
             continue;
         }
-        uint8_t bytes[KeySize + 2] = {id, route};
-        memcpy(bytes + 2, key.data(), key.size());
+        uint8_t bytes[KeySize + 3] = {static_cast<uint8_t>(DeviceRole), config.id, config.route};
+        memcpy(bytes + 3, key.data(), key.size());
         if (store.putBytes("config", bytes, sizeof(bytes)) != sizeof(bytes)) {
             setStoreFault();
             return;
@@ -184,6 +182,7 @@ void radioFault(int16_t status) {
     radioAt = millis();
     Serial.printf("RADIO ERROR %d\n", status);
 #ifdef EWS_ROVER
+    recentAck = false;
     waitingAck = false;
     lastAttemptAcked = false;
 #endif
@@ -358,15 +357,15 @@ void runRole(uint32_t now) {
         }
         return;
     }
-    const uint32_t retryMs = routeId ? 40000 : 20000;
+    const uint32_t retryMs = identity.route ? 40000 : 20000;
     const uint32_t interval = retryMs + jitterMs + (lastAttemptAcked ? 10000 : 0);
     if (sentOnce && !elapsed(now, sentAt, interval)) {
         return;
     }
 
     Report report;
-    report.rover = deviceId;
-    report.route = routeId;
+    report.rover = identity.id;
+    report.route = identity.route;
     report.kind = mode == Mode::Sos ? Kind::Sos : Kind::Clear;
     report.sequence = sent.report.sequence;
     report.fix = mode == Mode::Sos && fixValid;
@@ -401,10 +400,13 @@ void roleDisplay(uint32_t now) {
     row(3, mode == Mode::Idle ? "HOLD 2s FOR SOS" : recentAck ? "RX ACK SEEN" : "WAIT ACK");
     row(4, fixValid ? "GPS FIX" : "NO GPS FIX");
     row(5, mode == Mode::Sos ? "HOLD 5s: CLEAR" : mode == Mode::Clear ? "HOLD 2s: SOS" : "");
-    char identity[17];
-    snprintf(identity, sizeof(identity), "ID %u / %s %u", deviceId,
-             routeId ? "NODE" : "DIRECT", routeId);
-    row(6, identity);
+    char line[17];
+    if (identity.route) {
+        snprintf(line, sizeof(line), "ID %u / NODE %u", identity.id, identity.route);
+    } else {
+        snprintf(line, sizeof(line), "ID %u / DIRECT", identity.id);
+    }
+    row(6, line);
     digitalWrite(LedPin, mode != Mode::Idle && (recentAck || (now / 250) % 2));
 }
 #elif defined(EWS_NODE)
@@ -416,7 +418,7 @@ void runRole(uint32_t now) {
         return;
     }
     const bool isAck = message.report.kind == Kind::Ack;
-    if (!(isAck ? relay.downlink(message, now) : relay.uplink(message, deviceId, now))) {
+    if (!(isAck ? relay.downlink(message, now) : relay.uplink(message, identity.id, now))) {
         return;
     }
     delay(100);  // Let the previous sender turn around before a relay transmission.
@@ -430,7 +432,7 @@ void runRole(uint32_t now) {
 
 void roleDisplay(uint32_t now) {
     char line[17];
-    snprintf(line, sizeof(line), "NODE %u", deviceId);
+    snprintf(line, sizeof(line), "NODE %u", identity.id);
     row(2, line);
     const bool awaiting = relay.awaiting(now);
     row(3, awaiting ? "WAITING BASE ACK" : "LISTENING");
