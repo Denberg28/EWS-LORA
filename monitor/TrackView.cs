@@ -15,6 +15,7 @@ sealed class TrackView : Control
     private int selected;
     private bool connected;
     private float zoom = 1;
+    private SignalEstimate?[] estimates = [];
 
     public TrackView(Fleet fleet)
     {
@@ -23,12 +24,13 @@ sealed class TrackView : Control
         ResizeRedraw = true;
     }
 
-    public void ShowFleet(int id, bool live)
+    public void ShowFleet(int id, bool live, SignalEstimate?[] signals)
     {
         if (selected != id)
             zoom = 1;
         selected = id;
         connected = live;
+        estimates = live ? signals : [];
         Invalidate();
     }
 
@@ -51,8 +53,10 @@ sealed class TrackView : Control
         if (Width < 130 || Height < 130)
             return;
         Rover[] visible = fleet.Latest?.Rovers.Where(r => selected == 0 || r.Id == selected).ToArray() ?? [];
+        SignalEstimate? Estimate(Rover rover) => estimates.Length == 0 ? null : estimates[rover.Id - 1];
         var locations = visible.SelectMany(r => fleet.Tracks[r.Id - 1].Select(p => p.Position)
-            .Concat(r.HasPosition ? [r.Position] : Array.Empty<Location>())).ToArray();
+            .Concat(r.HasPosition ? [r.Position] : Array.Empty<Location>())
+            .Concat(Estimate(r) is SignalEstimate rf ? [rf.Position] : Array.Empty<Location>())).ToArray();
         if (locations.Length == 0)
         {
             g.DrawString("Waiting for a rover position", Font, muted, 18, Height / 2f);
@@ -71,6 +75,17 @@ sealed class TrackView : Control
         var xy = locations.Select(Project).ToArray();
         double minX = xy.Min(p => p.X), maxX = xy.Max(p => p.X);
         double minY = xy.Min(p => p.Y), maxY = xy.Max(p => p.Y);
+        foreach (var rover in visible)
+        {
+            if (Estimate(rover) is not SignalEstimate rf)
+                continue;
+            var center = Project(rf.Position);
+            double radius = rf.Radius / 1.1132;
+            minX = Math.Min(minX, center.X - radius);
+            maxX = Math.Max(maxX, center.X + radius);
+            minY = Math.Min(minY, center.Y - radius);
+            maxY = Math.Max(maxY, center.Y + radius);
+        }
         var plot = new Rectangle(28, 45, Width - 56, Height - 98);
         double scale = zoom * Math.Min(plot.Width / Math.Max(60, maxX - minX),
             plot.Height / Math.Max(60, maxY - minY));
@@ -104,6 +119,19 @@ sealed class TrackView : Control
                     g.DrawEllipse(trail, points[0].X - 2, points[0].Y - 2, 4, 4);
             }
 
+            if (Estimate(rover) is SignalEstimate rf)
+            {
+                PointF center = Screen(rf.Position);
+                float radius = (float)(rf.Radius / 1.1132 * scale);
+                using var ring = new Pen(Color.Gold, 2) { DashStyle = DashStyle.Dash };
+                using var wash = new SolidBrush(Color.FromArgb(24, Color.Gold));
+                var bounds = new RectangleF(center.X - radius, center.Y - radius, radius * 2, radius * 2);
+                g.FillEllipse(wash, bounds);
+                g.DrawEllipse(ring, bounds);
+                g.DrawLine(ring, center.X - 5, center.Y, center.X + 5, center.Y);
+                g.DrawLine(ring, center.X, center.Y - 5, center.X, center.Y + 5);
+                g.DrawString($"{rover.Label} · RF estimate", Font, text, center.X + 9, center.Y);
+            }
             if (!rover.HasPosition)
                 continue;
             PointF point = Screen(rover.Position);
@@ -119,7 +147,8 @@ sealed class TrackView : Control
         }
 
         g.Restore(saved);
-        g.DrawString("Solid marker · recent fix     Open marker · last known", Font, muted, 18, Height - 43);
+        g.DrawString(estimates.Any(r => r != null) ? "Dashed area · RF estimate    Open marker · last GPS" :
+            "Solid marker · recent fix     Open marker · last known", Font, muted, 18, Height - 43);
         double meters = 60 / scale * 1.1132;
         string distance = meters >= 1000 ? $"{meters / 1000:0.#} km" : $"{meters:0.#} m";
         using var scaleLine = new Pen(Muted, 2);

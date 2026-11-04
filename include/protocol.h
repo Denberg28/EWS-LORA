@@ -24,7 +24,7 @@ using RoverName = std::array<char, NameSize + 1>;
 using ReportBytes = std::array<uint8_t, ReportSize>;
 using Frame = std::array<uint8_t, FrameSize>;
 
-enum class Kind : uint8_t { Sos = 1, Clear = 2, Ack = 3, ClearAck = 4, Position = 5, NodeStatus = 6 };
+enum class Kind : uint8_t { Sos = 1, Clear = 2, Ack = 3, ClearAck = 4, Position = 5, NodeStatus = 6, Signal = 7 };
 enum class Mode : uint8_t { Idle, Sos, Clear };
 enum class Role : uint8_t { Base = 'B', Node = 'N', Rover = 'R' };
 
@@ -58,6 +58,13 @@ bool decodeStoredReport(const uint8_t* in, size_t size, Report& report);
 bool parseName(const char* input, RoverName& name);
 bool isAck(Kind kind);
 bool isIncident(Kind kind);
+constexpr uint32_t SignalStartMs = 4600;
+constexpr uint32_t SignalSlotMs = 450;
+constexpr uint32_t SignalWindowMs = 9500;
+bool validSignal(int32_t deciDbm);
+bool needsSignal(const Message& message);
+Message makeSignal(const Message& sos, uint8_t node, int16_t deciDbm);
+bool matchesSignal(const Message& observation, const Message& sos);
 bool acceptsTelemetryAtBase(const Message& message);
 
 // Volatile ordering for unacknowledged observations. Incident replay protection is separate.

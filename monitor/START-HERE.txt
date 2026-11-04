@@ -1,4 +1,4 @@
-EWS LoRa Fleet Monitor v0.4.0-rc.1
+EWS LoRa Fleet Monitor v0.5.0-rc.1
 Controlled bench-test candidate for Windows 10/11 x64
 
 1. Extract this folder. Open EWS-LoRa-Monitor.exe. Choose Demo to try the display.
@@ -13,6 +13,12 @@ Controlled bench-test candidate for Windows 10/11 x64
 5. Export tracks to GeoJSON before closing or switching networks. The app keeps up
    to 2,048 recent movement points per rover in memory. Local exports contain
    coordinates. Store and share them according to your response procedures.
+
+For GPS-less SOS, select Load anchors and import a calibrated receiver CSV.
+Use the included template. A dashed RF estimate appears when at least three
+calibrated receivers hear the same attempt and the readings support an area.
+Demo shows the transition from GPS to an RF estimate. See the repository
+README for survey and calibration instructions.
 
 The offline track plot shows received fixes. A hollow marker is a last known
 position. Gaps indicate interrupted observation. Neither a heartbeat nor a

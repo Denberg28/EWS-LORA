@@ -20,7 +20,10 @@ record Rover(int Id, int Route, string Name, Alarm Alarm, bool Restored, int Con
 }
 
 record Node(int Id, int HeartbeatAge, int ForwardAge);
-record Snapshot(ulong Base, ulong Boot, long Uptime, BaseState State, Rover[] Rovers, Node[] Nodes);
+record Snapshot(ulong Base, ulong Boot, long Uptime, BaseState State, Rover[] Rovers, Node[] Nodes)
+{
+    public SignalEvidence?[] Signals { get; } = new SignalEvidence?[8];
+}
 
 sealed class TelemetryReader
 {
@@ -54,6 +57,13 @@ sealed class TelemetryReader
 
     private Snapshot? Parse(string value)
     {
+        if (value.StartsWith("EWSL,A,", StringComparison.Ordinal))
+        {
+            if (row == 16 && pending != null)
+                ReadSignal(value, pending);
+            return null;
+        }
+
         if (!value.StartsWith("EWS1,", StringComparison.Ordinal))
             return null; // Base diagnostic logs can appear between complete rows.
 
@@ -96,6 +106,19 @@ sealed class TelemetryReader
 
         pending = null;
         return row == 16 && value == "EWS1,E" ? current : null;
+    }
+
+    private static void ReadSignal(string value, Snapshot snapshot)
+    {
+        string[] fields = value.Split(',');
+        if (fields.Length != 13 || !Number(fields[2], 1, 8, out int id) ||
+            !Number(fields[3], 0, 74, out int age) || snapshot.Signals[id - 1] != null)
+            return;
+        int[] values = new int[9];
+        for (int i = 0; i < values.Length; i++)
+            if (!Number(fields[i + 4], -1450, 0, out values[i]) || values[i] is > -200 and < 0)
+                return;
+        snapshot.Signals[id - 1] = new(age, values);
     }
 
     private static bool Age(string input, out int number) => Number(input, -1, int.MaxValue, out number);

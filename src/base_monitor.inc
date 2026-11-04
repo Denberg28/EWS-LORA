@@ -1,3 +1,79 @@
+// Only a durably accepted no-fix SOS opens a measurement window.
+struct SignalAttempt {
+    Message sos;
+    uint32_t opened = 0;
+    int16_t rssi[MaxNodes + 1]{};
+};
+struct DirectSignal {
+    uint64_t nonce = 0;
+    uint32_t sequence = 0;
+    uint32_t heard = 0;
+    int16_t rssi = 0;
+};
+SignalAttempt collecting[MaxRovers];
+SignalAttempt completed[MaxRovers];
+DirectSignal directSignals[MaxRovers];
+constexpr uint32_t SignalExpiryMs = 75000;
+
+void rememberDirectSignal(const Message& sos, int16_t rssi, uint32_t now) {
+    auto& direct = directSignals[sos.report.rover - 1];
+    if (direct.nonce != sos.nonce || direct.sequence != sos.report.sequence) {
+        direct.nonce = sos.nonce;
+        direct.sequence = sos.report.sequence;
+        direct.heard = now;
+        direct.rssi = rssi;
+    }
+}
+
+void startSignalCollection(const Message& request, uint32_t now) {
+    const uint8_t index = request.report.rover - 1;
+    auto& pending = collecting[index];
+    auto& last = completed[index];
+    if (!needsSignal(request)) {
+        pending = SignalAttempt{};
+        last = SignalAttempt{};
+        directSignals[index] = DirectSignal{};
+        return;
+    }
+    if (request.nonce == pending.sos.nonce || request.nonce == last.sos.nonce) {
+        return;
+    }
+    if (pending.sos.nonce && elapsed(now, pending.opened, SignalWindowMs)) {
+        last = pending;
+    }
+    pending = SignalAttempt{};
+    pending.sos = request;
+    pending.opened = now;
+    const auto& direct = directSignals[index];
+    if (direct.nonce == request.nonce && direct.sequence == request.report.sequence &&
+        !elapsed(now, direct.heard, 3000)) {
+        pending.rssi[0] = direct.rssi;
+    }
+}
+
+void collectSignal(const Message& observation, uint32_t now) {
+    auto& pending = collecting[observation.report.rover - 1];
+    if (matchesSignal(observation, pending.sos) && !elapsed(now, pending.opened, SignalWindowMs)) {
+        auto& rssi = pending.rssi[observation.report.route];
+        if (!rssi) {
+            rssi = static_cast<int16_t>(observation.report.latitude);
+        }
+    }
+}
+
+const SignalAttempt* completedSignal(uint8_t index, uint32_t now) {
+    auto& pending = collecting[index];
+    auto& last = completed[index];
+    if (pending.sos.nonce && elapsed(now, pending.opened, SignalWindowMs)) {
+        last = pending;
+        pending = SignalAttempt{};
+    }
+    if (last.sos.nonce && !elapsed(now, last.opened, SignalExpiryMs)) {
+        return &last;
+    }
+    return nullptr;
+}
+
 // Base-only USB monitor feed. Observations are volatile and never change a saved incident.
 struct RoverObservation {
     TelemetryCursor cursor;
@@ -72,7 +148,8 @@ void streamMonitor(uint32_t now) {
     static uint32_t started = 0;
     static uint8_t rowIndex = 0;
     static bool streaming = false;
-    constexpr uint8_t EndRow = 1 + MaxRovers + MaxNodes;
+    constexpr uint8_t SignalRow = 1 + MaxRovers + MaxNodes;
+    constexpr uint8_t EndRow = SignalRow + MaxRovers;
     if (!Serial || (streaming && elapsed(now, started, 1500))) {
         streaming = false;
         return;
@@ -110,10 +187,22 @@ void streamMonitor(uint32_t now) {
                           static_cast<long>(cached ? stored.report.longitude : rover.longitude),
                           static_cast<unsigned long>(rover.point),
                           static_cast<unsigned long>(rover.segment), unsigned(cached));
-    } else if (rowIndex < EndRow) {
+    } else if (rowIndex < SignalRow) {
         const auto& node = nodeObservations[rowIndex - MaxRovers - 1];
         length = snprintf(line, sizeof(line), "EWS1,N,%u,%ld,%ld\n", rowIndex - MaxRovers,
                           ageAt(seconds, node.heartbeat), ageAt(seconds, node.forwarded));
+    } else if (rowIndex < EndRow) {
+        const uint8_t index = rowIndex - SignalRow;
+        const auto* evidence = completedSignal(index, now);
+        if (!evidence) {
+            ++rowIndex;
+            return;
+        }
+        const auto& values = evidence->rssi;
+        length = snprintf(line, sizeof(line), "EWSL,A,%u,%lu,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
+                          unsigned(index + 1), static_cast<unsigned long>((now - evidence->opened) / 1000),
+                          values[0], values[1], values[2], values[3], values[4], values[5],
+                          values[6], values[7], values[8]);
     } else {
         length = snprintf(line, sizeof(line), "EWS1,E\n");
     }

@@ -1,4 +1,4 @@
-# v0.4.0-rc.1 validation gates
+# v0.5.0-rc.1 validation gates
 
 Software acceptance requires passing host tests, all three firmware builds, image packaging and checksum checks in GitHub Actions. Hardware acceptance requires the test below on matching physical equipment. Record exact commit, board revisions, routes, RF profile, antenna, power, measured timings and results. Keep private keys and incident coordinates out of published evidence.
 
@@ -40,3 +40,28 @@ Baseline is the v0.3.0-rc.1 tag at `5ec98202fd59e7fe6186e9568a5abbc2e5dbafce`. V
 3. Feed changing synthetic GNSS positions to both rovers and confirm the monitor adds points in receipt order. Stop GNSS and wait for a no-fix report, then resume. Verify a hollow last-known marker and a separate track leg after recovery. Export and inspect GeoJSON with longitude first.
 4. Close the Base USB connection for at least 10 seconds. Confirm saved SOS remains marked last known, current contact becomes unavailable, and reconnect on the same port recovers without restarting the app. Repeat with a Base reboot. Exercise a busy COM port and a different Base. Verify fault messages and isolation of tracks.
 5. Turn off the relay for more than 190 seconds and verify it becomes overdue while the direct rover continues. Restore it. During ongoing telemetry, exercise simultaneous SOS and CLEAR. Run at least ten isolated latch attempts per path and compare receipt/ACK timing with baseline, including one shared-node run. Repeat the eight-hour endurance check with idle tracking enabled.
+
+## RF fallback acceptance
+
+Use v0.4.0-rc.1 as the incident timing baseline. The v0.5 software gates cover
+observation framing, same-attempt correlation, out-of-range RSSI, estimator
+behavior on synthetic readings, insufficient or collinear anchors, inconsistent
+data, expiry, and the Windows demo transition from GPS to a plotted RF estimate.
+
+Bench and field validation is pending. With three or more fixed, calibrated
+receivers, send a no-fix SOS from surveyed test points. Cover both direct and
+routed delivery, with and without direct Base reception. Confirm the normal
+ACK is issued first and that forwarded-hop RSSI never populates the Base
+reading. Expect the first complete evidence window after about 10 seconds,
+plus USB snapshot latency. Power off an anchor and verify no estimate with
+fewer than three valid readings. Re-enable GPS, send CLEAR, unplug USB and
+wait out evidence expiry in separate tests. Verify estimate removal and normal
+SOS handling in each applicable case. Confirm RF estimates never enter GPS
+tracks or GeoJSON. Run concurrent SOS drills and the existing eight-hour
+endurance check with observation traffic enabled.
+
+Compare estimated center and radius against surveyed truth across antenna
+orientations, obstructions and coverage edges. Record errors, radius containment,
+no-estimate rate and ACK latency. Establish acceptance thresholds for the
+actual deployment before operational use. The model radius is unvalidated
+until these trials are complete.

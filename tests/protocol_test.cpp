@@ -214,6 +214,35 @@ int main() {
     heartbeat.report.fix = true;
     assert(!encode(key, heartbeat, wire));
 
+    Message noFix = original;
+    noFix.report.fix = false;
+    noFix.report.latitude = noFix.report.longitude = 0;
+    assert(needsSignal(noFix));
+    const Message observation = makeSignal(noFix, 3, -905);
+    assert(encode(key, observation, wire));
+    assert(decode(key, wire.data(), wire.size(), received));
+    assert(matchesSignal(received, noFix));
+    assert(!acceptsAtBase(received) && !acceptsTelemetryAtBase(received));
+    assert(!peerReport(received, 2, peer));
+    received.forwarded = true;
+    assert(!encode(key, received, wire) && !matchesSignal(received, noFix));
+    assert(!encode(key, makeSignal(noFix, 0, -905), wire));
+    assert(!encode(key, makeSignal(noFix, 3, -1451), wire));
+    Message otherAttempt = noFix;
+    ++otherAttempt.nonce;
+    assert(!matchesSignal(observation, otherAttempt));
+    otherAttempt = noFix;
+    ++otherAttempt.report.sequence;
+    assert(!matchesSignal(observation, otherAttempt));
+    otherAttempt = noFix;
+    ++otherAttempt.report.rover;
+    assert(!matchesSignal(observation, otherAttempt));
+    otherAttempt = noFix;
+    otherAttempt.report.fix = true;
+    assert(!matchesSignal(observation, otherAttempt));
+    otherAttempt.report.kind = Kind::Clear;
+    assert(!matchesSignal(observation, otherAttempt));
+
     uint32_t next, limit;
     assert(reserveSequenceBlock(0, next, limit) && next == 1 && limit == 256);
     assert(reserveSequenceBlock(limit, next, limit) && next == 257 && limit == 512);

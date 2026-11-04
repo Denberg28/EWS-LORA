@@ -20,6 +20,15 @@ sealed class MonitorForm : Form
     private readonly Button export = new() { Text = "Export tracks", AutoSize = true, Enabled = false };
     private readonly System.Windows.Forms.Timer timer = new() { Interval = 400 };
     private readonly TrackView plot;
+    private static readonly Anchor[] DemoAnchors = [
+        new(0, 12.5, 123.5, -80, 3, 6), new(1, 12.5, 123.502, -80, 3, 6),
+        new(2, 12.502, 123.501, -80, 3, 6)
+    ];
+    private Anchor[] anchors = [];
+    private ulong configuredBase;
+    private Snapshot? evaluatedSnapshot;
+    private readonly SignalEstimate?[] estimates = new SignalEstimate?[8];
+    private readonly Button anchorSetup = new() { Text = "Load anchors", AutoSize = true };
     private SerialFeed? feed;
     private bool demoActive;
     private bool linkUp;
@@ -47,7 +56,7 @@ sealed class MonitorForm : Form
         layout.RowStyles.Add(new(SizeType.AutoSize));
         layout.RowStyles.Add(new(SizeType.Percent, 100));
         var heading = Flow(TextLabel("EWS LoRa    /    FLEET MONITOR", 17), ports, Action("Refresh", RefreshPorts),
-            connect, demo);
+            connect, demo, anchorSetup);
         layout.Controls.Add(heading, 0, 0);
         layout.Controls.Add(connection, 0, 1);
 
@@ -83,6 +92,7 @@ sealed class MonitorForm : Form
 
         connect.Click += (_, _) => ToggleConnection();
         demo.Click += (_, _) => ToggleDemo();
+        anchorSetup.Click += (_, _) => LoadAnchors();
         copy.Click += (_, _) => CopyPosition();
         export.Click += (_, _) => ExportTracks();
         rovers.SelectedIndexChanged += (_, _) => { if (!updating) UpdateSelection(); };
@@ -182,6 +192,7 @@ sealed class MonitorForm : Form
         demoAt = 0;
         demo.Text = demoActive ? "Exit demo" : "Demo";
         connect.Enabled = !demoActive;
+        anchorSetup.Enabled = !demoActive;
         if (!demoActive)
             connection.Text = "Demo ended · connect the Base by USB.";
         Render();
@@ -237,6 +248,11 @@ sealed class MonitorForm : Form
     {
         var snapshot = fleet.Latest;
         bool live = linkUp && snapshot?.State == BaseState.READY;
+        if (snapshot != evaluatedSnapshot)
+        {
+            evaluatedSnapshot = snapshot;
+            UpdateEstimates(snapshot);
+        }
         int selected = Selected;
         var shown = snapshot?.Rovers.Where(r => r.Seen)
             .OrderByDescending(r => r.Alarm == Alarm.Sos).ThenBy(r => r.Id).ToArray() ?? [];
@@ -252,6 +268,7 @@ sealed class MonitorForm : Form
                 Heard(r.ContactAge, Fleet.RoverLate, live),
                 r.Route == 0 ? "Direct" : $"Node {r.Route}",
                 r.Fix == Fix.Valid && live && r.FixAge < Fleet.RoverLate ? "Recent fix" :
+                live && estimates[r.Id - 1] != null ? "RF estimate" :
                 r.HasPosition ? "Last known" : r.Fix == Fix.Missing ? "No fix" : "Unknown" })).ToArray();
         var nodeRows = snapshot?.Nodes.Where(n => n.HeartbeatAge >= 0 || n.ForwardAge >= 0 ||
                 shown.Any(r => r.Route == n.Id)).Select(n => (
@@ -299,23 +316,76 @@ sealed class MonitorForm : Form
 
     private Rover? SelectedRover() => Selected is int id and > 0 ? fleet.Latest?.Rovers[id - 1] : null;
 
+    private void LoadAnchors()
+    {
+        using var dialog = new OpenFileDialog { Filter = "Anchor CSV (*.csv)|*.csv", CheckFileExists = true };
+        if (dialog.ShowDialog(this) != DialogResult.OK)
+            return;
+        try
+        {
+            using var reader = File.OpenText(dialog.FileName);
+            anchors = SignalLocation.ReadAnchors(reader);
+            configuredBase = demoActive ? 0 : fleet.Latest?.Base ?? 0;
+            anchorSetup.Text = $"Anchors ({anchors.Length})";
+            UpdateEstimates(fleet.Latest);
+            Render();
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or FormatException)
+        {
+            MessageBox.Show(this, ex.Message, "Anchor setup");
+        }
+    }
+
+    private void UpdateEstimates(Snapshot? snapshot)
+    {
+        Array.Clear(estimates);
+        var activeAnchors = demoActive ? DemoAnchors : anchors;
+        if (snapshot?.State != BaseState.READY || activeAnchors.Length == 0)
+            return;
+        if (!demoActive && configuredBase != 0 && configuredBase != snapshot.Base)
+        {
+            anchors = [];
+            configuredBase = 0;
+            anchorSetup.Text = "Load anchors";
+            return;
+        }
+        if (!demoActive)
+            configuredBase = snapshot.Base;
+        foreach (Rover rover in snapshot.Rovers)
+            if (rover.Alarm == Alarm.Sos && rover.Fix == Fix.Missing &&
+                snapshot.Signals[rover.Id - 1] is SignalEvidence evidence)
+                estimates[rover.Id - 1] = SignalLocation.Locate(activeAnchors, evidence);
+    }
+
     private void UpdateSelection()
     {
         var rover = SelectedRover();
         bool live = linkUp && fleet.Latest?.State == BaseState.READY;
-        copy.Enabled = rover?.HasPosition == true && !demoActive;
-        details.Text = rover?.HasPosition == true
+        var estimate = live && rover != null ? estimates[rover.Id - 1] : null;
+        copy.Enabled = (rover?.HasPosition == true || estimate != null) && !demoActive;
+        copy.Text = estimate != null ? "Copy estimate" : "Copy GPS";
+        details.Text = estimate != null
+            ? $"RF estimate · {estimate.Position}\nSearch radius {estimate.Radius} m · {estimate.Anchors} anchors"
+            : live && rover is { Alarm: Alarm.Sos, Fix: Fix.Missing }
+                ? $"{rover.Label} · No GPS fix · {(anchors.Length == 0 ? "Load calibrated anchors" : "No usable RF estimate")}" +
+                  (rover.HasPosition ? $"\nLast GPS · {rover.Position}" : "")
+            : rover?.HasPosition == true
             ? $"{rover.Label}  ·  {rover.Position}  ·  {(live && rover.Fix == Fix.Valid && rover.FixAge < Fleet.RoverLate ? "recent fix" : "last known")}"
             : rover != null ? $"{rover.Label}  ·  No coordinates available"
             : "Select a rover to inspect its last known position.";
-        plot.ShowFleet(Selected, live);
+        plot.ShowFleet(Selected, live, estimates);
     }
 
     private void CopyPosition()
     {
-        if (SelectedRover() is not { HasPosition: true } rover)
+        if (SelectedRover() is not Rover rover)
             return;
-        try { Clipboard.SetText(rover.Position.ToString()); }
+        SignalEstimate? estimate = linkUp && fleet.Latest?.State == BaseState.READY ? estimates[rover.Id - 1] : null;
+        if (estimate == null && !rover.HasPosition)
+            return;
+        string position = estimate == null ? rover.Position.ToString() :
+            $"RF estimate: {estimate.Position} (search radius {estimate.Radius} m)";
+        try { Clipboard.SetText(position); }
         catch (System.Runtime.InteropServices.ExternalException)
         {
             MessageBox.Show(this, "The clipboard is busy. Try again.", Text);
@@ -356,31 +426,41 @@ sealed class MonitorForm : Form
             DemoSnapshot();
         SetLink(true);
         Render();
+        bool gps = rovers.Items.Count == 2 && nodes.Items.Count == 1 &&
+                   fleet.Tracks[0].Count == 8 && alert.Text == "1 ACTIVE SOS";
+        for (int i = 0; i < 3; i++)
+            DemoSnapshot();
+        Render();
         using var preview = new Bitmap(plot.Width, plot.Height);
         plot.DrawToBitmap(preview, plot.ClientRectangle);
-        return rovers.Items.Count == 2 && nodes.Items.Count == 1 &&
-               fleet.Tracks[0].Count == 8 && alert.Text == "1 ACTIVE SOS";
+        return gps && estimates[0] != null && fleet.Tracks[0].Count == 10 &&
+               rovers.Items[0].SubItems[4].Text == "RF estimate";
     }
 
     private void DemoSnapshot()
     {
         int step = demoStep++;
+        bool noGps = step % 24 is >= 10 and < 17;
         var frame = new StringBuilder($"EWS1,B,1,1,{step},READY\n");
         for (int i = 1; i <= 8; i++)
         {
             if (i is 1 or 2)
             {
-                int angle = step % 100;
+                int age = i == 1 && noGps ? step % 24 - 9 : 0;
+                int lastFix = step - age;
+                int angle = lastFix % 100;
                 int alarm = i == 1 && step % 24 is >= 6 and < 17 ? 1 : i == 1 && step % 24 >= 17 ? 2 : 0;
                 int lat = 1250000 + (int)(55 * Math.Sin(angle / 6.0)) + i * 35;
                 int lon = 12350000 + (int)(65 * Math.Cos(angle / 6.0)) + i * 60;
-                frame.AppendLine($"EWS1,R,{i},{i - 1},{(i == 1 ? "ALPHA" : "BRAVO")},{alarm},0,0,2,0,{lat},{lon},{step + 1},{step / 100 + 1},0");
+                frame.AppendLine($"EWS1,R,{i},{i - 1},{(i == 1 ? "ALPHA" : "BRAVO")},{alarm},0,0,{(age == 0 ? 2 : 1)},{age},{lat},{lon},{lastFix + 1},{(lastFix + 7) / 24 + 1},0");
             }
             else
                 frame.AppendLine($"EWS1,R,{i},0,,0,0,-1,0,-1,0,0,0,0,0");
         }
         for (int i = 1; i <= 8; i++)
             frame.AppendLine($"EWS1,N,{i},{(i == 1 ? step % 8 : -1)},{(i == 1 ? 0 : -1)}");
+        if (noGps)
+            frame.AppendLine("EWSL,A,1,10,-835,-835,-853,0,0,0,0,0,0");
         frame.AppendLine("EWS1,E");
         new TelemetryReader().Feed(frame.ToString(), snapshot => fleet.Apply(snapshot, DateTimeOffset.UtcNow));
     }

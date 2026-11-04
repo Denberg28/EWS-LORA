@@ -4,14 +4,25 @@ Offline SOS firmware for the LilyGO T3-S3 SX1262 915 MHz. Tap the Rover BOOT but
 
 ## Windows fleet monitor
 
-Download `ews-lora-v0.4.0-rc.1-windows-x64.zip` from the [controlled bench candidate](https://github.com/Denberg28/EWS-LORA/releases/tag/v0.4.0-rc.1). Extract it and launch `EWS-LoRa-Monitor.exe` on Windows 10/11 x64. It includes its .NET runtime. **Demo** runs the same display with synthetic data.
+Download `ews-lora-v0.5.0-rc.1-windows-x64.zip` from the [controlled bench candidate](https://github.com/Denberg28/EWS-LORA/releases/tag/v0.5.0-rc.1). Extract it and launch `EWS-LoRa-Monitor.exe` on Windows 10/11 x64. It includes its .NET runtime. **Demo** runs the same display with synthetic data.
 
-1. Put the matching v0.4 firmware on the Base, Nodes and Rovers. Use same-role app-only images on provisioned boards.
+1. Put the matching v0.5 firmware on the Base, Nodes and Rovers. Use same-role app-only images on provisioned boards.
 2. Connect the **Base** by USB data cable and close other serial monitors. Select its COM port and click **Connect**. The app retries this port after interruption and refreshes from a full Base snapshot. If Windows assigns a different port, disconnect, click **Refresh**, then select the new port.
 3. The fleet list prioritizes SOS and separates radio contact from incident state. Select a rover to follow its color-coded trail and copy its last coordinates. **Fleet view** shows all tracks. The offline plot uses a coordinate grid and an approximate scale. Fresh and last-known positions have distinct markers. The relay table distinguishes heartbeat from observed forwarding.
 4. **Export tracks** saves GeoJSON for GIS use. The app keeps the latest 2,048 track points per rover in memory. Export before closing or switching to another Base. The monitor runs offline and transmits no device commands.
 
 An idle rover reports at randomized 95–135 second intervals. SOS reports still use the existing incident cadence. Movement between fixes is unknown, and radio traffic can be missed. No-fix, overdue, and disconnected indications leave saved SOS state visible.
+
+## SOS location fallback when GPS is unavailable
+
+Use three or more fixed receivers that can independently hear the rover's original SOS. A receiver can be the Base or a relay node. For example, deploy the Base and two nodes around the search area. If the Base cannot directly hear the rover, use at least three nodes that can hear the rover and report to the Base. The assigned SOS relay route still governs incident delivery.
+
+1. Survey each receiver's coordinates. Spread receivers around the intended coverage area and avoid placing them in a line.
+2. Calibrate with the installed antennas, transmit power and representative terrain. Use `ANCHORS-TEMPLATE.csv`. Enter the Base as ID 0 and nodes as their provisioned IDs 1–8. Enter surveyed WGS84 latitude and longitude, median RSSI in dBm at a known 100 m, the fitted path-loss exponent, and the measured RSSI residual margin in dB. Repeat trials at several known distances and directions. The fit uses `RSSI(d) = RSSI(100 m) - 10 × exponent × log10(d / 100 m)`. The accepted margin is 6–20 dB. Keep actual site coordinates private.
+3. Load the CSV in the Windows monitor using **Load anchors**. Re-load it for each session and whenever the network or receiver layout changes. Verify the setup in a controlled no-fix SOS drill. The Base COM feed exposes raw samples for calibration. In `EWSL,A` rows the nine readings are in Base-to-node-8 order, in tenths of dBm. Zero means the receiver supplied no reading.
+4. An eligible SOS with no GPS fix can display a dashed **RF estimate** search area. Select the rover to see the center, radius and anchor count. The last GPS point stays separately visible. Estimates are excluded from GPS trails and GeoJSON. GPS recovery, CLEAR, USB loss, or aged readings remove the estimate.
+
+The search radius describes a region consistent with the configured signal model. It is not a measured error bound or a guaranteed containment radius. Weak receiver geometry, insufficient reception and inconsistent readings can produce no estimate. The feature is intended for supervised bench and field evaluation. Use the verified SOS identity and established response procedures if location evidence is unavailable. **Demo** simulates an SOS losing GPS and shows the RF fallback.
 
 ## Roles and wiring
 
@@ -27,13 +38,13 @@ The firmware uses 916.0 MHz, 10 dBm conducted power, SF8 and 125 kHz bandwidth. 
 
 ## Flash and configure
 
-1. Download the desired role images and checksum manifest from [v0.4.0-rc.1](https://github.com/Denberg28/EWS-LORA/releases/tag/v0.4.0-rc.1). Check each downloaded file against the corresponding SHA-256 in `SHA256SUMS` with `sha256sum FILE` or `Get-FileHash FILE -Algorithm SHA256`.
+1. Download the desired role images and checksum manifest from [v0.5.0-rc.1](https://github.com/Denberg28/EWS-LORA/releases/tag/v0.5.0-rc.1). Check each downloaded file against the corresponding SHA-256 in `SHA256SUMS` with `sha256sum FILE` or `Get-FileHash FILE -Algorithm SHA256`.
 2. Install Python 3.12 and run `python -m pip install esptool==4.8.1 pyserial==3.5`. Substitute your USB ports below. If upload mode is needed, hold BOOT while tapping RESET. Use the merged images at 0x0 for **first installation on dedicated boards**. A merged image overwrites NVS sectors that hold configuration and state.
 
    ```sh
-   python -m esptool --chip esp32s3 --port COM5 write_flash 0x0 ews-lora-v0.4.0-rc.1-base.bin
-   python -m esptool --chip esp32s3 --port COM6 write_flash 0x0 ews-lora-v0.4.0-rc.1-node.bin
-   python -m esptool --chip esp32s3 --port COM7 write_flash 0x0 ews-lora-v0.4.0-rc.1-rover.bin
+   python -m esptool --chip esp32s3 --port COM5 write_flash 0x0 ews-lora-v0.5.0-rc.1-base.bin
+   python -m esptool --chip esp32s3 --port COM6 write_flash 0x0 ews-lora-v0.5.0-rc.1-node.bin
+   python -m esptool --chip esp32s3 --port COM7 write_flash 0x0 ews-lora-v0.5.0-rc.1-rover.bin
    ```
 
 3. Download or clone this tagged source for `scripts/provision.py`. Generate one private key for the entire network. Hold GPIO21 low while resetting each blank board, then release it when the screen shows **USB CONFIG MODE**. Close other serial monitors, run the matching command, then reset with GPIO21 released.
@@ -78,9 +89,10 @@ dotnet publish monitor/EwsMonitor.csproj -c Release -r win-x64 --self-contained 
 
 | Combination | Behavior |
 | --- | --- |
+| v0.5 Base and receiving Nodes + Windows v0.5 | RF fallback for a GPS-less SOS when three calibrated receivers hear the same attempt. v0.4 Rover SOS packets also support this |
 | v0.4 Base + v0.4 Rover/Node | SOS, idle rover tracking, and node heartbeats via the Windows monitor |
 | v0.4 Base + v0.3 Rover/Node | Existing SOS/CLEAR works; positions are available during SOS. Routed reports can provide evidence of forwarding |
 | v0.3 Base | Existing SOS/CLEAR works with v0.4 boards. The Windows monitor requires the v0.4 USB feed |
 | v0.4 Rover through v0.3 Node | SOS/CLEAR works; the older Node discards idle tracking frames |
 
-The v0.4 candidate retains the v0.3 RF incident format and NVS record layout. After resolving active incidents, the original [v0.3 images](https://github.com/Denberg28/EWS-LORA/releases/tag/v0.3.0-rc.1) can be restored at 0x10000 by role. Remove the Windows app by deleting its extracted folder. Keep any exported tracks you need.
+The v0.5 candidate retains the v0.4 RF incident and telemetry formats and NVS layout. v0.4 Windows monitors ignore RF evidence rows. After resolving active incidents, the [v0.4 images](https://github.com/Denberg28/EWS-LORA/releases/tag/v0.4.0-rc.1) can be restored by role using the app-only images at 0x10000. The v0.4 candidate retains the v0.3 RF incident format and NVS record layout. After resolving active incidents, the original [v0.3 images](https://github.com/Denberg28/EWS-LORA/releases/tag/v0.3.0-rc.1) can be restored at 0x10000 by role. Remove the Windows app by deleting its extracted folder. Keep any exported tracks you need.
