@@ -2,6 +2,17 @@
 
 Offline SOS firmware for the LilyGO T3-S3 SX1262 915 MHz. Tap the Rover BOOT button, release, then press and hold for two seconds. The Base saves and displays the named alert and any external GNSS coordinates. Other Rovers can display authenticated alerts they hear. A Rover can reach the Base directly or through one assigned Relay Node. A displayed ACK confirms durable Base receipt. Human response is a separate action.
 
+## Windows fleet monitor
+
+Download `ews-lora-v0.4.0-rc.1-windows-x64.zip` from the [controlled bench candidate](https://github.com/Denberg28/EWS-LORA/releases/tag/v0.4.0-rc.1). Extract it and launch `EWS-LoRa-Monitor.exe` on Windows 10/11 x64. It includes its .NET runtime. **Demo** runs the same display with synthetic data.
+
+1. Put the matching v0.4 firmware on the Base, Nodes and Rovers. Use same-role app-only images on provisioned boards.
+2. Connect the **Base** by USB data cable and close other serial monitors. Select its COM port and click **Connect**. The app retries this port after interruption and refreshes from a full Base snapshot. If Windows assigns a different port, disconnect, click **Refresh**, then select the new port.
+3. The fleet list prioritizes SOS and separates radio contact from incident state. Select a rover to follow its color-coded trail and copy its last coordinates. **Fleet view** shows all tracks. The offline plot uses a coordinate grid and an approximate scale. Fresh and last-known positions have distinct markers. The relay table distinguishes heartbeat from observed forwarding.
+4. **Export tracks** saves GeoJSON for GIS use. The app keeps the latest 2,048 track points per rover in memory. Export before closing or switching to another Base. The monitor runs offline and transmits no device commands.
+
+An idle rover reports at randomized 95–135 second intervals. SOS reports still use the existing incident cadence. Movement between fixes is unknown, and radio traffic can be missed. No-fix, overdue, and disconnected indications leave saved SOS state visible.
+
 ## Roles and wiring
 
 | Board | Firmware | USB configuration |
@@ -16,13 +27,13 @@ The firmware uses 916.0 MHz, 10 dBm conducted power, SF8 and 125 kHz bandwidth. 
 
 ## Flash and configure
 
-1. Download the desired role images and checksum manifest from [v0.3.0-rc.1](https://github.com/Denberg28/EWS-LORA/releases/tag/v0.3.0-rc.1). Check each downloaded file against the corresponding SHA-256 in `SHA256SUMS` with `sha256sum FILE` or `Get-FileHash FILE -Algorithm SHA256`.
+1. Download the desired role images and checksum manifest from [v0.4.0-rc.1](https://github.com/Denberg28/EWS-LORA/releases/tag/v0.4.0-rc.1). Check each downloaded file against the corresponding SHA-256 in `SHA256SUMS` with `sha256sum FILE` or `Get-FileHash FILE -Algorithm SHA256`.
 2. Install Python 3.12 and run `python -m pip install esptool==4.8.1 pyserial==3.5`. Substitute your USB ports below. If upload mode is needed, hold BOOT while tapping RESET. Use the merged images at 0x0 for **first installation on dedicated boards**. A merged image overwrites NVS sectors that hold configuration and state.
 
    ```sh
-   python -m esptool --chip esp32s3 --port COM5 write_flash 0x0 ews-lora-v0.3.0-rc.1-base.bin
-   python -m esptool --chip esp32s3 --port COM6 write_flash 0x0 ews-lora-v0.3.0-rc.1-node.bin
-   python -m esptool --chip esp32s3 --port COM7 write_flash 0x0 ews-lora-v0.3.0-rc.1-rover.bin
+   python -m esptool --chip esp32s3 --port COM5 write_flash 0x0 ews-lora-v0.4.0-rc.1-base.bin
+   python -m esptool --chip esp32s3 --port COM6 write_flash 0x0 ews-lora-v0.4.0-rc.1-node.bin
+   python -m esptool --chip esp32s3 --port COM7 write_flash 0x0 ews-lora-v0.4.0-rc.1-rover.bin
    ```
 
 3. Download or clone this tagged source for `scripts/provision.py`. Generate one private key for the entire network. Hold GPIO21 low while resetting each blank board, then release it when the screen shows **USB CONFIG MODE**. Close other serial monitors, run the matching command, then reset with GPIO21 released.
@@ -55,3 +66,21 @@ The host tests use Linux, g++ and libssl-dev. Packaging requires a clean tracked
 Finish active incidents before maintenance. For a compatible **same-role app update** on an already installed board, flash the corresponding `-app.bin` at **0x10000** to preserve NVS. Avoid duplicate IDs and preserve active state when restoring compatible images. Replacing or erasing a Rover resets its replay counter. To reuse that ID, retire the old configuration and rekey the entire network from clean state. Clear state only after resolving active incidents. An unused ID can be assigned without resetting the existing fleet.
 
 Wire v3 requires a coordinated Base, Node and Rover upgrade. For existing v0.2 boards, use the same-role app-only images to retain the network key, IDs, Rover sequence and previous Base records. The new firmware reads v2 stored Base records and rewrites them in v3 format as updates arrive. Rolling back after that requires clean reprovisioning of the whole network with a fresh key, or restoring a coordinated offline backup. Resolve outstanding incidents first and re-run bench acceptance after any change. [Previous v0.2 release](https://github.com/Denberg28/EWS-LORA/releases/tag/v0.2.0-rc.1)
+
+### Windows build and compatibility
+
+Use the .NET SDK 8.0.419 for the candidate build. Windows is needed for the desktop smoke test. The parser and track tests also run on Linux.
+
+```sh
+dotnet run --project tests/monitor/MonitorTests.csproj -c Release
+dotnet publish monitor/EwsMonitor.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:EnableCompressionInSingleFile=true -p:DebugType=none -o monitor-build
+```
+
+| Combination | Behavior |
+| --- | --- |
+| v0.4 Base + v0.4 Rover/Node | SOS, idle rover tracking, and node heartbeats via the Windows monitor |
+| v0.4 Base + v0.3 Rover/Node | Existing SOS/CLEAR works; positions are available during SOS. Routed reports can provide evidence of forwarding |
+| v0.3 Base | Existing SOS/CLEAR works with v0.4 boards. The Windows monitor requires the v0.4 USB feed |
+| v0.4 Rover through v0.3 Node | SOS/CLEAR works; the older Node discards idle tracking frames |
+
+The v0.4 candidate retains the v0.3 RF incident format and NVS record layout. After resolving active incidents, the original [v0.3 images](https://github.com/Denberg28/EWS-LORA/releases/tag/v0.3.0-rc.1) can be restored at 0x10000 by role. Remove the Windows app by deleting its extracted folder. Keep any exported tracks you need.

@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.4.0-rc.1
+
+- Add a read-only Windows x64 monitor with rover contact, SOS state, relay heartbeats, offline movement trails, demo mode and GeoJSON export.
+- Add jittered authenticated rover positions and relay heartbeats, separate from durable SOS/CLEAR state.
+- Add a versioned Base USB snapshot feed and preserve v0.3 incident interoperability.
+- Desktop and firmware are controlled bench candidates pending physical fleet acceptance.
+
+
 ## v0.3.0-rc.1
 
 - Adds debounced BOOT tap-and-hold SOS and cancellation, external red/green outputs, and named GPS alert screens.

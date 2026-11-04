@@ -24,7 +24,7 @@ using RoverName = std::array<char, NameSize + 1>;
 using ReportBytes = std::array<uint8_t, ReportSize>;
 using Frame = std::array<uint8_t, FrameSize>;
 
-enum class Kind : uint8_t { Sos = 1, Clear = 2, Ack = 3, ClearAck = 4 };
+enum class Kind : uint8_t { Sos = 1, Clear = 2, Ack = 3, ClearAck = 4, Position = 5, NodeStatus = 6 };
 enum class Mode : uint8_t { Idle, Sos, Clear };
 enum class Role : uint8_t { Base = 'B', Node = 'N', Rover = 'R' };
 
@@ -57,6 +57,19 @@ bool decodeReport(const uint8_t* in, Report& report);
 bool decodeStoredReport(const uint8_t* in, size_t size, Report& report);
 bool parseName(const char* input, RoverName& name);
 bool isAck(Kind kind);
+bool isIncident(Kind kind);
+bool acceptsTelemetryAtBase(const Message& message);
+
+// Volatile ordering for unacknowledged observations. Incident replay protection is separate.
+class TelemetryCursor {
+public:
+    bool accept(const Message& message);
+
+private:
+    uint64_t session = 0;
+    uint64_t previous = 0;
+    uint32_t sequence = 0;
+};
 bool peerReport(const Message& message, uint8_t ownId, Report& report);
 bool encode(const Key& key, const Message& message, Frame& frame);
 bool decode(const Key& key, const uint8_t* data, size_t length, Message& message);

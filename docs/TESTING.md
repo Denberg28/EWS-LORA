@@ -1,4 +1,4 @@
-# v0.3.0-rc.1 validation gates
+# v0.4.0-rc.1 validation gates
 
 Software acceptance requires passing host tests, all three firmware builds, image packaging and checksum checks in GitHub Actions. Hardware acceptance requires the test below on matching physical equipment. Record exact commit, board revisions, routes, RF profile, antenna, power, measured timings and results. Keep private keys and incident coordinates out of published evidence.
 
@@ -23,3 +23,20 @@ Use a Base, at least one Node and two Rovers with attached matched antennas. Pro
 6. **Fault and endurance.** Verify a different-key network is ignored. Check that an old ACK never transitions Rover to ACK SEEN. Check a valid older SOS cannot reopen a durably cleared alert. Interrupt power in both directions and observe recovery. Run the documented routes for eight hours on bench power, record misses and unexpected resets, then repeat over deployment routes and on the actual portable supply. Stable acceptance requires zero lost incident state, zero unexpected resets and at least 99% received scheduled attempts for each isolated clean bench path. Establish a field service boundary and battery runtime using measured results.
 7. **Names, peer display and cancellation.** Name Rover 1 ALPHA and Rover 2 BRAVO via USB. Verify names and GPS coordinates appear on the Base and receiving peers. Power off the Base, request a cancellation and verify the sender stays red and the peer keeps the SOS. Restore the Base and verify the sender switches green only after a matching CLEAR ACK. Confirm the peer removes the alert if it hears the confirmed CLEAR, and retains the record if it was offline during confirmation.
 8. **Delivery.** On the test boards flash the published role-matched app-only images at 0x10000 and verify NVS configuration retention and normal operation. Reflash the initial images on dedicated clean hardware and exercise the documented baseline rollback in isolation.
+
+## Windows monitor bench acceptance
+
+Baseline is the v0.3.0-rc.1 tag at `5ec98202fd59e7fe6186e9568a5abbc2e5dbafce`. Validate v0.4 on the same board revisions and RF profile. Record actual timings and keep keys and coordinates out of published evidence.
+
+| Gate | Procedure and pass criteria |
+| --- | --- |
+| A/C | Run `./scripts/check.sh` and compile all three roles. Run `dotnet run --project tests/monitor/MonitorTests.csproj -c Release`. Existing incident tests pass and telemetry remains isolated from incident storage and ACKs |
+| B/D | Monitor tests reject malformed, incomplete, and oversized frames. Tracks split on fix loss, reconnect and reboot. Saved SOS survives overdue contact. Packaged EXE runs `--smoke` on Windows and renders the demo with two rover rows, one node row, trails and one SOS |
+| E | USB, GPS, RF contention, telemetry throughput and the paired hardware procedure below are BLOCKED pending boards |
+| F | CI verifies merged and application-only images, Windows package, commit and checksums. First flash, hardware rollback and real USB operation require bench verification |
+
+1. Open Demo without network access. Confirm two moving rover tracks and a node row. Verify fleet fit, rover selection and the SOS/Clear changes. Exit Demo and confirm synthetic tracks are gone.
+2. Connect the staffed Base and observe its radio state within 7 seconds of opening the correct COM port. Power an idle direct rover, a routed rover, and the relay. On an isolated, clean setup, expect initial rover and node evidence within 25 seconds of power-up. Verify forwarded traffic and heartbeat can be observed independently.
+3. Feed changing synthetic GNSS positions to both rovers and confirm the monitor adds points in receipt order. Stop GNSS and wait for a no-fix report, then resume. Verify a hollow last-known marker and a separate track leg after recovery. Export and inspect GeoJSON with longitude first.
+4. Close the Base USB connection for at least 10 seconds. Confirm saved SOS remains marked last known, current contact becomes unavailable, and reconnect on the same port recovers without restarting the app. Repeat with a Base reboot. Exercise a busy COM port and a different Base. Verify fault messages and isolation of tracks.
+5. Turn off the relay for more than 190 seconds and verify it becomes overdue while the direct rover continues. Restore it. During ongoing telemetry, exercise simultaneous SOS and CLEAR. Run at least ten isolated latch attempts per path and compare receipt/ACK timing with baseline, including one shared-node run. Repeat the eight-hour endurance check with idle tracking enabled.

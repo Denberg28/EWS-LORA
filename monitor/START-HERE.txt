@@ -1,0 +1,23 @@
+EWS LoRa Fleet Monitor v0.4.0-rc.1
+Controlled bench-test candidate for Windows 10/11 x64
+
+1. Extract this folder. Open EWS-LoRa-Monitor.exe. Choose Demo to try the display.
+2. Install the matching Base, Node and Rover firmware on their respective boards.
+   Existing provisioned boards use the same-role -app.bin at 0x10000 to retain NVS.
+   Follow the repository README for the complete flash, rollback and bench procedure.
+3. Connect the Base by USB with a data cable. Close any serial monitor or flasher.
+   Click Refresh, choose its COM port and click Connect. The Base feed starts
+   automatically when the Base is running. The app retries the selected port.
+4. Select a rover to view its trail and copy its coordinates. Fleet view restores
+   all tracks. Relay status separates heartbeat from forwarded traffic.
+5. Export tracks to GeoJSON before closing or switching networks. The app keeps up
+   to 2,048 recent movement points per rover in memory. Local exports contain
+   coordinates. Store and share them according to your response procedures.
+
+The offline track plot shows received fixes. A hollow marker is a last known
+position. Gaps indicate interrupted observation. Neither a heartbeat nor a
+displayed SOS confirms a human response. Validate with the physical fleet before
+operational use.
+
+Firmware, source and instructions
+https://github.com/Denberg28/EWS-LORA
