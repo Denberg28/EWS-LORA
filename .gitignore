@@ -1,0 +1,6 @@
+.pio/
+dist/
+__pycache__/
+*.key
+
+.venv/
