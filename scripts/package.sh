@@ -13,6 +13,7 @@ mkdir -p dist
 for role in beacon receiver; do
   build=".pio/build/$role"
   python3 "$esptool" --chip esp32s3 image_info "$build/firmware.bin"
+  cp "$build/firmware.bin" "dist/ews-lora-$version-$role-app.bin"
   python3 "$esptool" --chip esp32s3 merge_bin --flash_mode dio --flash_size 4MB \
     --flash_freq 80m -o "dist/ews-lora-$version-$role.bin" \
     0x0 "$build/bootloader.bin" 0x8000 "$build/partitions.bin" \
@@ -30,6 +31,7 @@ done
 
 (
   cd dist
-  sha256sum "ews-lora-$version-beacon.bin" "ews-lora-$version-receiver.bin" BUILD.txt > SHA256SUMS
+  sha256sum "ews-lora-$version-beacon.bin" "ews-lora-$version-receiver.bin" \
+    "ews-lora-$version-beacon-app.bin" "ews-lora-$version-receiver-app.bin" BUILD.txt > SHA256SUMS
   sha256sum --check SHA256SUMS
 )

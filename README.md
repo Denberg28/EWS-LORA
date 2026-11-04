@@ -16,8 +16,8 @@ Keep both boards on the same protocol, RF settings and pair key. The SX127x and 
 
 ## Install and pair
 
-1. Download both matching candidate images and `SHA256SUMS` from [Releases](https://github.com/Denberg28/EWS-LORA/releases). Download `BUILD.txt` too and verify all hashes with `sha256sum -c SHA256SUMS` on Linux or compare with `Get-FileHash -Algorithm SHA256` on Windows.
-2. Install Python 3.12 and run `python -m pip install pyserial==3.5 esptool==4.8.1`. Connect one board at a time. Substitute its port and role in the command below. The image includes the bootloader, partition table and application. If required, hold BOOT while tapping RESET to enter upload mode. Use RESET alone for a normal reboot.
+1. Download the candidate images and `SHA256SUMS` from [Releases](https://github.com/Denberg28/EWS-LORA/releases). Download all files listed in `SHA256SUMS`, including `BUILD.txt`, and verify their hashes with `sha256sum -c SHA256SUMS` on Linux or compare with `Get-FileHash -Algorithm SHA256` on Windows.
+2. Install Python 3.12 and run `python -m pip install pyserial==3.5 esptool==4.8.1`. Connect one board at a time. Substitute its port and role in the command below. Use the merged images for first installation on dedicated blank boards. The merged image includes the bootloader, partition table and application, and writing it at 0x0 erases the NVS sectors that hold the key and incident state. If required, hold BOOT while tapping RESET to enter upload mode. Use RESET alone for a normal reboot.
 
    ```sh
    python -m esptool --chip esp32s3 --port COM5 write_flash 0x0 ews-lora-v0.1.0-rc.1-beacon.bin
@@ -48,6 +48,13 @@ pio run -e beacon -t upload --upload-port COM5
 pio run -e receiver -t upload --upload-port COM6
 ```
 
-On Ubuntu with g++ and libssl-dev, run `./scripts/check.sh`. Build both roles before running `./scripts/package.sh` from a clean tracked checkout. The packaging command uses PlatformIO's installed esptool, emits merged binaries and verifies hashes. See the [design](docs/ARCHITECTURE.md), [validation procedure](docs/TESTING.md) and [changelog](CHANGELOG.md).
+On Ubuntu with g++ and libssl-dev, run `./scripts/check.sh`. Build both roles before running `./scripts/package.sh` from a clean tracked checkout. The packaging command uses PlatformIO's installed esptool, emits merged and application-only binaries and verifies hashes. See the [design](docs/ARCHITECTURE.md), [validation procedure](docs/TESTING.md) and [changelog](CHANGELOG.md).
 
-Resolve active incidents before maintenance. Flash the same role on each board and keep NVS intact for compatible upgrades and rollbacks. This first candidate has no prior working build. For rollback to a board's previous application, restore a flash backup made before installing EWS LORA. If wiping or replacing either board, retire the old pair, erase **both** boards with `python -m esptool --chip esp32s3 --port PORT erase_flash`, reflash both images and pair with a fresh key. Erasing deletes saved alert state and keys. Recheck reception after any upgrade, rollback or re-pairing.
+Resolve active incidents before maintenance. For compatible upgrades and rollbacks on already installed EWS LORA boards, flash the same role's **application-only** file at 0x10000 to preserve NVS. Keep the partition layout unchanged.
+
+```sh
+python -m esptool --chip esp32s3 --port COM5 write_flash 0x10000 ews-lora-v0.1.0-rc.1-beacon-app.bin
+python -m esptool --chip esp32s3 --port COM6 write_flash 0x10000 ews-lora-v0.1.0-rc.1-receiver-app.bin
+```
+
+This first candidate has no prior working build. For rollback to a board's previous application, restore a flash backup made before installing EWS LORA. If wiping or replacing either board, retire the old pair, erase **both** boards with `python -m esptool --chip esp32s3 --port PORT erase_flash`, reflash both images and pair with a fresh key. Erasing deletes saved alert state and keys. Recheck reception after any upgrade, rollback or re-pairing.

@@ -64,6 +64,10 @@ jobs:
           sha256sum --check SHA256SUMS
           grep -Fx "Commit: $SOURCE" BUILD.txt
           grep -Fx "Version: $TAG" BUILD.txt
+          if [[ $(gh api "repos/$GH_REPO/git/ref/heads/main" --jq .object.sha) != "$SOURCE" ]]; then
+            echo "A newer commit is on main. Skipping superseded candidate."
+            exit 0
+          fi
           if gh release view "$TAG" --json isDraft > release.json 2> /dev/null; then
             if grep -q '"isDraft":true' release.json; then
               echo "Existing draft needs inspection before publication."
@@ -75,5 +79,6 @@ jobs:
           gh release create "$TAG" --target "$SOURCE" --draft --prerelease --latest=false \
             --title "EWS LORA $TAG — hardware test candidate" \
             --notes "Bench-test candidate for two LilyGO T3-S3 SX1262 915 MHz boards. Host protocol checks and both firmware builds passed on this source. Hardware validation and field coverage are blocked pending physical tests. Use in controlled validation only. See README.md and docs/TESTING.md for provisioning, compatibility, rollback, and HIL." \
-            "ews-lora-$TAG-beacon.bin" "ews-lora-$TAG-receiver.bin" BUILD.txt SHA256SUMS
+            "ews-lora-$TAG-beacon.bin" "ews-lora-$TAG-receiver.bin" \
+            "ews-lora-$TAG-beacon-app.bin" "ews-lora-$TAG-receiver-app.bin" BUILD.txt SHA256SUMS
           gh release edit "$TAG" --draft=false --prerelease --latest=false
