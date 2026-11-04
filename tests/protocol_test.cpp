@@ -173,6 +173,47 @@ int main() {
     baseAck = makeAck(routed);
     assert(!node.downlink(baseAck, relayAt + RelayGapMs + RelayWindowMs));
 
+    Message position = original;
+    position.report.kind = Kind::Position;
+    assert(encode(key, position, wire));
+    assert(decode(key, wire.data(), wire.size(), received));
+    assert(!acceptsAtBase(received) && !acceptsTelemetryAtBase(received));
+    assert(!peerReport(received, 2, peer));
+    assert(classify(received.report, Report{}) == Arrival::Reject);
+    assert(!node.uplink(received, 2, relayAt + 2 * RelayGapMs));
+    assert(!decodeStoredReport(wire.data(), ReportSize, peer));
+    received.forwarded = true;
+    assert(acceptsTelemetryAtBase(received) && !acceptsAtBase(received));
+    received.forwarded = false;
+    received.report.route = 0;
+    assert(acceptsTelemetryAtBase(received));
+    TelemetryCursor cursor;
+    assert(cursor.accept(received));
+    assert(!cursor.accept(received));
+    received.report.sequence++;
+    assert(cursor.accept(received));
+    received.report.sequence--;
+    assert(!cursor.accept(received));
+    const auto oldSession = received;
+    received.nonce++;
+    received.report.sequence = 1;
+    assert(cursor.accept(received));
+    assert(!cursor.accept(oldSession));
+
+    Message heartbeat;
+    heartbeat.report.kind = Kind::NodeStatus;
+    heartbeat.report.rover = 2;
+    heartbeat.report.sequence = 1;
+    heartbeat.nonce = 22;
+    assert(encode(key, heartbeat, wire));
+    assert(decode(key, wire.data(), wire.size(), received));
+    assert(acceptsTelemetryAtBase(received) && !acceptsAtBase(received));
+    heartbeat.report.route = 2;
+    assert(!encode(key, heartbeat, wire));
+    heartbeat.report.route = 0;
+    heartbeat.report.fix = true;
+    assert(!encode(key, heartbeat, wire));
+
     uint32_t next, limit;
     assert(reserveSequenceBlock(0, next, limit) && next == 1 && limit == 256);
     assert(reserveSequenceBlock(limit, next, limit) && next == 257 && limit == 512);

@@ -37,7 +37,7 @@ ReportBytes encodeReport(const Report& report) {
 }
 
 bool decodeReport(const uint8_t* in, Report& report) {
-    if (in[0] != 'E' || in[1] != 'W' || in[2] != 3 || in[3] < 1 || in[3] > 4 ||
+    if (in[0] != 'E' || in[1] != 'W' || in[2] != 3 || in[3] < 1 || in[3] > 6 ||
         in[4] > 1) {
         return false;
     }
@@ -61,7 +61,8 @@ bool decodeReport(const uint8_t* in, Report& report) {
     if (!next.sequence || !next.rover || next.rover > MaxRovers || next.route > MaxNodes ||
         lat < -9000000 || lat > 9000000 || lon < -18000000 ||
         lon > 18000000 || (next.fix && isAck(next.kind)) ||
-        (!next.fix && (lat != 0 || lon != 0))) {
+        (!next.fix && (lat != 0 || lon != 0)) ||
+        (next.kind == Kind::NodeStatus && (next.fix || next.route || next.name[0]))) {
         return false;
     }
     next.latitude = static_cast<int32_t>(lat);
@@ -72,7 +73,7 @@ bool decodeReport(const uint8_t* in, Report& report) {
 
 bool decodeStoredReport(const uint8_t* in, size_t size, Report& report) {
     if (size == ReportSize) {
-        return decodeReport(in, report);
+        return decodeReport(in, report) && isIncident(report.kind);
     }
     if (size != LegacyReportSize || in[2] != 2 || (in[3] != 1 && in[3] != 2)) {
         return false;
@@ -99,6 +100,29 @@ bool parseName(const char* input, RoverName& name) {
 
 bool isAck(Kind kind) {
     return kind == Kind::Ack || kind == Kind::ClearAck;
+}
+
+bool isIncident(Kind kind) {
+    return kind == Kind::Sos || kind == Kind::Clear;
+}
+
+bool acceptsTelemetryAtBase(const Message& message) {
+    return (message.report.kind == Kind::Position || message.report.kind == Kind::NodeStatus) &&
+           message.forwarded == (message.report.route != 0);
+}
+
+bool TelemetryCursor::accept(const Message& message) {
+    if (!message.nonce || !message.report.sequence ||
+        (message.nonce == session && message.report.sequence <= sequence) ||
+        message.nonce == previous) {
+        return false;
+    }
+    if (message.nonce != session) {
+        previous = session;
+        session = message.nonce;
+    }
+    sequence = message.report.sequence;
+    return true;
 }
 
 bool peerReport(const Message& message, uint8_t ownId, Report& report) {
@@ -228,7 +252,7 @@ bool parseConfig(const char* line, Role role, Identity& identity, Key& key) {
 }
 
 Arrival classify(const Report& incoming, const Report& stored) {
-    if (!incoming.sequence || isAck(incoming.kind) ||
+    if (!incoming.sequence || !isIncident(incoming.kind) ||
         (stored.sequence && incoming.rover != stored.rover) || incoming.sequence < stored.sequence) {
         return Arrival::Reject;
     }
@@ -239,7 +263,7 @@ Arrival classify(const Report& incoming, const Report& stored) {
 }
 
 bool acceptsAtBase(const Message& request) {
-    return !isAck(request.report.kind) && request.forwarded == (request.report.route != 0);
+    return isIncident(request.report.kind) && request.forwarded == (request.report.route != 0);
 }
 
 Message makeAck(const Message& request) {
@@ -265,7 +289,7 @@ bool matchesAck(const Message& ack, const Message& sent) {
 }
 
 bool Relay::uplink(Message& request, uint8_t node, uint32_t now) {
-    if (!node || request.report.route != node || isAck(request.report.kind) ||
+    if (!node || request.report.route != node || !isIncident(request.report.kind) ||
         request.forwarded ||
         (used && (!elapsed(now, openedAt, RelayGapMs) || request.nonce == last.nonce))) {
         return false;

@@ -5,6 +5,9 @@
 #include <U8x8lib.h>
 #include <Wire.h>
 #include <esp_task_wdt.h>
+#include <esp_timer.h>
+#include <bootloader_random.h>
+#include <esp_system.h>
 
 #include <cstring>
 
@@ -12,8 +15,6 @@
 
 #ifdef EWS_ROVER
 #include <TinyGPSPlus.h>
-#include <bootloader_random.h>
-#include <esp_system.h>
 #include <cmath>
 #endif
 
@@ -42,6 +43,14 @@ constexpr Role DeviceRole = Role::Base;
 #endif
 
 Identity identity;
+
+uint64_t randomToken() {
+    uint64_t token;
+    bootloader_random_enable();  // SAR entropy. Wi-Fi, BLE and ADC are unused.
+    esp_fill_random(&token, sizeof(token));
+    bootloader_random_disable();
+    return token;
+}
 
 Preferences store;
 Key key{};
@@ -83,9 +92,19 @@ bool lastAttemptAcked = false;
 #elif defined(EWS_NODE)
 Relay relay;
 uint32_t forwardedCount = 0;
+TelemetryCursor relayedPositions[MaxRovers];
+uint32_t lastPositionRelay = 0;
+bool positionRelayed = false;
 #else
 bool ackSent = false;
 uint32_t ackSentAt = 0;
+#endif
+
+#if defined(EWS_ROVER) || defined(EWS_NODE)
+uint64_t telemetrySession = 0;
+uint32_t telemetrySequence = 0;
+uint32_t telemetryAt = 0;
+uint32_t telemetryInterval = 0;
 #endif
 
 #ifndef EWS_NODE
@@ -281,6 +300,30 @@ bool transmit(const Message& message) {
     return true;
 }
 
+#if defined(EWS_ROVER) || defined(EWS_NODE)
+void sendTelemetry(Report report, uint32_t now, uint32_t period) {
+    if (!elapsed(now, telemetryAt, telemetryInterval)) {
+        return;
+    }
+    telemetryAt = now;
+    telemetryInterval = period + esp_random() % 40000;
+    if (!telemetrySession || telemetrySequence == UINT32_MAX) {
+        telemetrySession = randomToken();
+        telemetrySequence = 0;
+    }
+    if (!telemetrySession) {
+        return;
+    }
+    report.sequence = ++telemetrySequence;
+    Message message;
+    message.report = report;
+    message.nonce = telemetrySession;
+    if (transmit(message)) {
+        listen();
+    }
+}
+#endif
+
 #ifndef EWS_NODE
 void reportKey(uint8_t rover, char (&out)[5]) {
     snprintf(out, sizeof(out), "r%u", rover);
@@ -329,7 +372,7 @@ void loadRecords() {
         const size_t length = store.getBytesLength(storageKey);
         if ((length != bytes.size() && length != LegacyReportSize) ||
             store.getBytes(storageKey, bytes.data(), length) != length ||
-            !decodeStoredReport(bytes.data(), length, record.report) || isAck(record.report.kind) ||
+            !decodeStoredReport(bytes.data(), length, record.report) ||
             record.report.rover != id) {
             recordStoreFault();
             return;
@@ -544,7 +587,19 @@ void runRole(uint32_t now) {
             logReport("RECEIVED", peer);
         }
     }
-    if (waitingAck || mode == Mode::Idle || !radioReady || storeFault) {
+    if (waitingAck || !radioReady || storeFault) {
+        return;
+    }
+    if (mode == Mode::Idle) {
+        Report position;
+        position.kind = Kind::Position;
+        position.rover = identity.id;
+        position.route = identity.route;
+        position.name = localName;
+        position.fix = fixValid;
+        position.latitude = fixValid ? latitude : 0;
+        position.longitude = fixValid ? longitude : 0;
+        sendTelemetry(position, now, 95000);
         return;
     }
     const uint32_t retryMs = identity.route ? 40000 : 20000;
@@ -574,9 +629,7 @@ void runRole(uint32_t now) {
     }
 
     sent.report = report;
-    bootloader_random_enable();  // SAR entropy. Wi-Fi, BLE and ADC are unused.
-    esp_fill_random(&sent.nonce, sizeof(sent.nonce));
-    bootloader_random_disable();
+    sent.nonce = randomToken();
     if (!sent.nonce) {
         return;
     }
@@ -643,7 +696,31 @@ void runRole(uint32_t now) {
     if (!radioReady) {
         return;
     }
-    if (!receive(message) || !radioReady) {
+    const bool received = receive(message);
+    if (!radioReady) {
+        return;
+    }
+    if (!received) {
+        if (!relay.awaiting(now)) {
+            Report status;
+            status.kind = Kind::NodeStatus;
+            status.rover = identity.id;
+            sendTelemetry(status, now, 115000);
+        }
+        return;
+    }
+    if (message.report.kind == Kind::Position) {
+        if (!message.forwarded && message.report.route == identity.id && !relay.awaiting(now) &&
+            (!positionRelayed || elapsed(now, lastPositionRelay, 12000)) &&
+            relayedPositions[message.report.rover - 1].accept(message)) {
+            message.forwarded = true;
+            positionRelayed = true;
+            lastPositionRelay = now;
+            delay(100);
+            if (transmit(message)) {
+                listen();
+            }
+        }
         return;
     }
     const bool acknowledgment = isAck(message.report.kind);
@@ -670,11 +747,20 @@ void roleDisplay(uint32_t now) {
     digitalWrite(LedPin, awaiting);
 }
 #else
+#include "base_monitor.inc"
+
 void loadRole() { loadRecords(); }
 
 void runRole(uint32_t now) {
     Message request;
-    if (!radioReady || !receive(request) || !acceptsAtBase(request)) {
+    if (!radioReady || !receive(request)) {
+        return;
+    }
+    if (acceptsTelemetryAtBase(request)) {
+        observeTelemetry(request);
+        return;
+    }
+    if (!acceptsAtBase(request)) {
         return;
     }
     const Arrival arrival = recordReport(request.report, now);
@@ -689,6 +775,8 @@ void runRole(uint32_t now) {
             listen();
         }
     }
+    records[request.report.rover - 1].restored = false;
+    observeRover(request.report);
     if (arrival == Arrival::New) {
         logReport("RECEIVED", request.report);
     }
@@ -751,6 +839,15 @@ void setup() {
     delay(40);
     const bool serviceRequested = digitalRead(ServicePin) == LOW;
     Serial.begin(115200);
+#if defined(EWS_ROVER) || defined(EWS_NODE)
+    telemetryAt = millis();
+    telemetryInterval = 3000 + esp_random() % 17000;
+#else
+    monitorBoot = randomToken();
+    if (!monitorBoot) {
+        monitorBoot = 1;
+    }
+#endif
     // Arduino-ESP32 2.0.x / ESP-IDF 4.4 watchdog API.
     const esp_err_t watchdog = esp_task_wdt_init(8, true);
     if (watchdog != ESP_OK ||
@@ -805,6 +902,8 @@ void loop() {
     }
 #ifdef EWS_ROVER
     updateRoverLeds(millis());
+#elif !defined(EWS_NODE)
+    streamMonitor(millis());
 #endif
     updateDisplay(millis());
     delay(5);
