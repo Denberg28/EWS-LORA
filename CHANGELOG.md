@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.2.0-rc.1
+
+- Adds separate Base, Relay Node and Rover images with runtime IDs and fixed direct or single-node routes.
+- Stores independent Base alert records for eight Rovers and rotates active SOS records on the OLED.
+- Adds authenticated one-hop forwarding, retry jitter and USB fleet provisioning. Uses wire v2.
+- Packages merged first-install and same-role app-only update images for all three roles.
+
 ## v0.1.0-rc.1
 
 - Initial test candidate for a single LilyGO T3-S3 SX1262 beacon and staffed receiver.

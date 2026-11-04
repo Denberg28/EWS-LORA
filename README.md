@@ -1,60 +1,55 @@
 # EWS LORA
 
-An offline, two-board SOS link for a controlled rescue exercise. Hold the beacon's SOS button for **2 seconds**. A staffed receiver displays the alert and any coordinates supplied by an external GNSS module. The beacon displays **RX ACK SEEN** when the paired receiver has saved the alert. Receipt and dispatch are separate events. Use the test candidate alongside established communications and rescue procedures.
+Offline SOS firmware for the LilyGO T3-S3 SX1262 915 MHz. Hold the Rover's SOS switch for two seconds. The Base saves and displays the alert and any external GNSS coordinates. A Rover can reach the Base directly or through one assigned Relay Node. A displayed ACK confirms durable Base receipt. Human response is a separate action.
 
-## Hardware
+## Roles and wiring
 
-| Item | Connection or requirement |
-| --- | --- |
-| Beacon and receiver | Two LilyGO T3-S3 v1.2/v1.3, **SX1262 915 MHz** variant, each with a matching antenna attached before power-up |
-| SOS switch | Normally open momentary switch from GPIO21 to GND on beacon. Use a large tactile button and short leads. On the receiver temporarily connect the same switch or jumper for key provisioning |
-| Optional GNSS | GNSS TX to beacon GPIO44, common GND, 9600 baud NMEA, 3.3 V logic. Power the module at its rated supply. Leave module RX disconnected |
-| Board wiring | SX1262 SPI SCK 5, MISO 3, MOSI 6, CS 7, RESET 8, BUSY 34, DIO1 33. OLED SDA 18, SCL 17, I²C 0x3C. LED GPIO37 |
-| Power | Start with USB power on both boards. For a portable test, use a suitable board supply and measure endurance under load |
+| Board | Firmware | USB configuration |
+| --- | --- | --- |
+| Staffed Base | `base` | ID 0, route 0. One Base per network |
+| Fixed Relay Node | `node` | Unique node ID 1–8, route 0 |
+| Portable SOS Rover | `rover` | Unique rover ID 1–8, route 0 for direct or the selected node ID 1–8 |
 
-Keep both boards on the same protocol, RF settings and pair key. The SX127x and 2.4 GHz variants and other LoRa stacks are outside this profile. The candidate uses 916.0 MHz, 10 dBm conducted power, SF8 and 125 kHz bandwidth. Verify applicable local limits, approval and antenna configuration before transmitting. Use an RF-contained bench if those conditions are unverified. [LilyGO hardware documentation](https://wiki.lilygo.cc/products/t3-series/t3-s3/)
+Use the **T3-S3 v1.2/v1.3 SX1262 915 MHz** variant for every board. Attach a matching antenna before powering any board. Use a normally open switch from GPIO21 to GND on each Rover. For configuration, temporarily connect a switch or jumper from GPIO21 to GND on the Base and Nodes. GPIO21 is distinct from the built-in BOOT switch. Optional GNSS uses 3.3 V logic NMEA at 9600 baud. Wire GNSS TX to Rover GPIO44 and common ground, power the module at its rated supply and leave its RX disconnected. [LilyGO board documentation](https://wiki.lilygo.cc/products/t3-series/t3-s3/)
 
-## Install and pair
+The firmware uses 916.0 MHz, 10 dBm conducted power, SF8 and 125 kHz bandwidth. Verify locally authorized operating parameters, antenna and equipment before transmitting. Use an RF-contained bench if those conditions are unverified.
 
-1. Download the candidate images and `SHA256SUMS` from [Releases](https://github.com/Denberg28/EWS-LORA/releases). Download all files listed in `SHA256SUMS`, including `BUILD.txt`, and verify their hashes with `sha256sum -c SHA256SUMS` on Linux or compare with `Get-FileHash -Algorithm SHA256` on Windows.
-2. Install Python 3.12 and run `python -m pip install pyserial==3.5 esptool==4.8.1`. Connect one board at a time. Substitute its port and role in the command below. Use the merged images for first installation on dedicated blank boards. The merged image includes the bootloader, partition table and application, and writing it at 0x0 erases the NVS sectors that hold the key and incident state. If required, hold BOOT while tapping RESET to enter upload mode. Use RESET alone for a normal reboot.
+## Flash and configure
 
-   ```sh
-   python -m esptool --chip esp32s3 --port COM5 write_flash 0x0 ews-lora-v0.1.0-rc.1-beacon.bin
-   python -m esptool --chip esp32s3 --port COM6 write_flash 0x0 ews-lora-v0.1.0-rc.1-receiver.bin
-   ```
-
-3. Generate **one** key per pair. While each blank board resets, hold its GPIO21 switch down (distinct from BOOT), then release when the screen shows **USB KEY MODE**. Run the port command for each board with the same private key file. Close any open serial monitor first. Then reset each board with GPIO21 released.
+1. Download the desired role images and checksum manifest from [v0.2.0-rc.1](https://github.com/Denberg28/EWS-LORA/releases/tag/v0.2.0-rc.1). Check each downloaded file against the corresponding SHA-256 in `SHA256SUMS` with `sha256sum FILE` or `Get-FileHash FILE -Algorithm SHA256`.
+2. Install Python 3.12 and run `python -m pip install esptool==4.8.1 pyserial==3.5`. Substitute your USB ports below. If upload mode is needed, hold BOOT while tapping RESET. Use the merged images at 0x0 for **first installation on dedicated boards**. A merged image overwrites NVS sectors that hold configuration and state.
 
    ```sh
-   python scripts/provision.py rescue-pair.key --generate
-   python scripts/provision.py rescue-pair.key --port COM5
-   python scripts/provision.py rescue-pair.key --port COM6
+   python -m esptool --chip esp32s3 --port COM5 write_flash 0x0 ews-lora-v0.2.0-rc.1-base.bin
+   python -m esptool --chip esp32s3 --port COM6 write_flash 0x0 ews-lora-v0.2.0-rc.1-node.bin
+   python -m esptool --chip esp32s3 --port COM7 write_flash 0x0 ews-lora-v0.2.0-rc.1-rover.bin
    ```
 
-4. Check **READY** on beacon and **LISTENING** on receiver. Hold SOS for 2 seconds and release. A blinking LED on beacon means an unacknowledged alert. Solid means an ACK for the latest completed attempt. The receiver LED blinks during a saved SOS. A short LED pulse each second signals a fault. OLED and optional USB logs at 115200 provide the detail.
-5. Hold beacon SOS for 5 seconds to request clear. Keep both boards powered until beacon returns to **READY** and receiver shows **REMOTE CLEAR**. During **CLEAR PENDING**, a new 2-second hold starts a new SOS. Verify incident closure separately with the receiver operator.
+3. Download or clone this tagged source for `scripts/provision.py`. Generate one private key for the entire network. Hold GPIO21 low while resetting each blank board, then release it when the screen shows **USB CONFIG MODE**. Close other serial monitors, run the matching command, then reset with GPIO21 released.
 
-An SOS works without a fix and can add coordinates later. Coordinates are last reported. The receiver displays a saved SOS after reboot. Unacknowledged alerts retry about every 20 seconds. A rapid clear or reactivation may wait for the next transmission slot. No SIM, internet or LoRaWAN gateway is required.
+   ```sh
+   python scripts/provision.py ews-network.key --generate
+   python scripts/provision.py ews-network.key --port COM5 --id 0
+   python scripts/provision.py ews-network.key --port COM6 --id 1
+   python scripts/provision.py ews-network.key --port COM7 --id 1 --via 1
+   ```
 
-## Build and maintain
+   This example routes Rover 1 through Node 1. For a direct Rover, set `--via 0` or omit it. For another Node or Rover, flash the same role image and choose an unused ID within that role. Label each board with its role, ID and route.
+4. On a controlled bench with Base and the selected Node powered, hold the Rover switch for 2 seconds and release. **WAIT ACK** means receipt has yet to be confirmed. **RX ACK SEEN** means the Base saved that attempt. Hold for 5 seconds to request CLEAR. Keep the boards powered until Rover returns to **READY**. Base cycles through active rover IDs and shows coordinates when available. The USB serial console at 115200 reports per-rover SOS and CLEAR.
+
+The bench candidate supports up to eight distinct IDs per mobile or relay role. Every Rover uses a fixed route. Capacity, simultaneous alerts, interference tolerance and field range require measurement. Use the test candidate alongside established emergency communications. See [architecture](docs/ARCHITECTURE.md) and [validation procedure](docs/TESTING.md).
+
+## Build, update, and roll back
 
 ```sh
-python -m venv .venv
-# Activate .venv for your shell, then:
 python -m pip install -r requirements-build.txt
-pio run -e beacon -e receiver
-pio run -e beacon -t upload --upload-port COM5
-pio run -e receiver -t upload --upload-port COM6
+pio run -e base -e node -e rover
+./scripts/check.sh
+./scripts/package.sh
 ```
 
-On Ubuntu with g++ and libssl-dev, run `./scripts/check.sh`. Build both roles before running `./scripts/package.sh` from a clean tracked checkout. The packaging command uses PlatformIO's installed esptool, emits merged and application-only binaries and verifies hashes. See the [design](docs/ARCHITECTURE.md), [validation procedure](docs/TESTING.md) and [changelog](CHANGELOG.md).
+The host tests use Linux, g++ and libssl-dev. Packaging requires a clean tracked checkout and generates merged images, app-only images and the checksum manifest.
 
-Resolve active incidents before maintenance. For compatible upgrades and rollbacks on already installed EWS LORA boards, flash the same role's **application-only** file at 0x10000 to preserve NVS. Keep the partition layout unchanged.
+Finish active incidents before maintenance. For a compatible **same-role app update** on an already installed board, flash the corresponding `-app.bin` at **0x10000** to preserve NVS. Avoid duplicate IDs and preserve active state when restoring compatible images. Replacing or erasing a Rover resets its replay counter. To reuse that ID, retire the old configuration and rekey the entire network from clean state. Clear state only after resolving active incidents. An unused ID can be assigned without resetting the existing fleet.
 
-```sh
-python -m esptool --chip esp32s3 --port COM5 write_flash 0x10000 ews-lora-v0.1.0-rc.1-beacon-app.bin
-python -m esptool --chip esp32s3 --port COM6 write_flash 0x10000 ews-lora-v0.1.0-rc.1-receiver-app.bin
-```
-
-This first candidate has no prior working build. For rollback to a board's previous application, restore a flash backup made before installing EWS LORA. If wiping or replacing either board, retire the old pair, erase **both** boards with `python -m esptool --chip esp32s3 --port PORT erase_flash`, reflash both images and pair with a fresh key. Erasing deletes saved alert state and keys. Recheck reception after any upgrade, rollback or re-pairing.
+Wire v2 roles require a coordinated upgrade. Wire v1 remains available from [v0.1.0-rc.1](https://github.com/Denberg28/EWS-LORA/releases/tag/v0.1.0-rc.1). For rollback, recover any outstanding alerts with the operator, then restore the matching legacy beacon and receiver images and re-pair those boards if their previous configuration was erased. Re-run the acceptance test after any change.

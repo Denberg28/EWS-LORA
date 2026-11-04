@@ -6,9 +6,14 @@
 
 namespace ews {
 
+constexpr uint8_t MaxRovers = 8;
+constexpr uint8_t MaxNodes = 8;
+constexpr uint32_t RelayWindowMs = 4000;
+constexpr uint32_t RelayGapMs = 38000;
+
 constexpr size_t KeySize = 32;
-constexpr size_t ReportSize = 17;
-constexpr size_t BodySize = 25;
+constexpr size_t ReportSize = 19;
+constexpr size_t BodySize = 28;
 constexpr size_t TagSize = 16;
 constexpr size_t FrameSize = BodySize + TagSize;
 
@@ -25,11 +30,14 @@ struct Report {
     bool fix = false;
     int32_t latitude = 0;
     int32_t longitude = 0;
+    uint8_t rover = 0;
+    uint8_t route = 0;
 };
 
 struct Message {
     Report report;
     uint64_t nonce = 0;
+    bool forwarded = false;
 };
 
 void write32(uint8_t* out, uint32_t value);
@@ -42,7 +50,22 @@ bool parseKey(const char* hex, Key& key);
 
 enum class Arrival { Reject, Duplicate, New };
 Arrival classify(const Report& incoming, const Report& stored);
+bool acceptsAtBase(const Message& request);
+Message makeAck(const Message& request);
 bool matchesAck(const Message& ack, const Message& sent);
+
+class Relay {
+public:
+    bool uplink(Message& request, uint8_t node, uint32_t now);
+    bool downlink(Message& ack, uint32_t now);
+    bool awaiting(uint32_t now) const;
+
+private:
+    Message last;
+    uint32_t openedAt = 0;
+    bool used = false;
+    bool pending = false;
+};
 
 constexpr uint32_t SequenceBlock = 256;
 bool reserveSequenceBlock(uint32_t highWater, uint32_t& next, uint32_t& limit);

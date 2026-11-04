@@ -14,14 +14,16 @@ int main() {
 
     Message sos;
     sos.report.sequence = 1;
+    sos.report.rover = 1;
     sos.nonce = UINT64_C(0x1122334455667788);
     Frame wire;
     assert(encode(key, sos, wire));
     const Frame golden = {{
-        0x45, 0x57, 0x01, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x88, 0x77, 0x66,
-        0x55, 0x44, 0x33, 0x22, 0x11, 0x46, 0x2c, 0x56, 0xc4, 0x41,
-        0xf1, 0xd5, 0xc8, 0xb3, 0x63, 0x8b, 0x6b, 0xeb, 0x1a, 0x2b, 0x9d
+        0x45, 0x57, 0x02, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00,
+        0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, 0xc7, 0x8c,
+        0x44, 0xc9, 0xb4, 0x4b, 0x42, 0x6b, 0xc4, 0xe9, 0xc8, 0xed,
+        0xba, 0xff, 0x1c, 0x65
     }};
     assert(wire == golden);
 
@@ -49,6 +51,7 @@ int main() {
     Message ack;
     ack.report.kind = Kind::Ack;
     ack.report.sequence = receiverState.sequence;
+    ack.report.rover = 1;
     ack.nonce = sos.nonce;
     assert(encode(key, ack, wire));
     assert(decode(key, wire.data(), wire.size(), received));
@@ -76,6 +79,7 @@ int main() {
     Message clear;
     clear.report.kind = Kind::Clear;
     clear.report.sequence = 3;
+    clear.report.rover = 1;
     clear.nonce = 7;
     assert(encode(key, clear, wire));
     assert(decode(key, wire.data(), wire.size(), received));
@@ -85,6 +89,49 @@ int main() {
     assert(decodeReport(nvs.data(), afterReset));
     assert(classify(sos.report, afterReset) == Arrival::Reject);
     assert(classify(clear.report, afterReset) == Arrival::Duplicate);
+
+    Message other = clear;
+    other.report.rover = 2;
+    assert(classify(other.report, afterReset) == Arrival::Reject);
+    assert(classify(other.report, Report{}) == Arrival::New);
+    assert(acceptsAtBase(other));
+    other.report.rover = MaxRovers + 1;
+    assert(!encode(key, other, wire));
+
+    Message routed = sos;
+    routed.report.sequence = 15;
+    routed.report.route = 2;
+    const Message original = routed;
+    assert(!acceptsAtBase(routed));
+    Relay node;
+    const uint32_t relayAt = UINT32_MAX - 40;
+    assert(!node.uplink(routed, 1, relayAt));
+    assert(node.uplink(routed, 2, relayAt));
+    assert(!node.uplink(routed, 2, relayAt + 1));
+    assert(encode(key, routed, wire));
+    assert(decode(key, wire.data(), wire.size(), received));
+    assert(acceptsAtBase(received));
+    Message baseAck = makeAck(received);
+    assert(!acceptsAtBase(baseAck));
+    assert(!matchesAck(baseAck, original));
+    Message wrongAck = baseAck;
+    wrongAck.report.rover++;
+    assert(!node.downlink(wrongAck, relayAt + 50));
+    wrongAck = baseAck;
+    wrongAck.nonce++;
+    assert(!node.downlink(wrongAck, relayAt + 60));
+    assert(node.downlink(baseAck, relayAt + 70));
+    assert(!node.downlink(baseAck, relayAt + 80));
+    assert(encode(key, baseAck, wire));
+    assert(decode(key, wire.data(), wire.size(), received));
+    assert(matchesAck(received, original));
+    routed = original;
+    assert(!node.uplink(routed, 2, relayAt + RelayGapMs));  // Exact replay.
+    routed.nonce++;
+    assert(!node.uplink(routed, 2, relayAt + RelayGapMs - 1));
+    assert(node.uplink(routed, 2, relayAt + RelayGapMs));
+    baseAck = makeAck(routed);
+    assert(!node.downlink(baseAck, relayAt + RelayGapMs + RelayWindowMs));
 
     uint32_t next, limit;
     assert(reserveSequenceBlock(0, next, limit) && next == 1 && limit == 256);
@@ -113,5 +160,5 @@ int main() {
     assert(!clearButton.update(true, edge + 30, 5000));
     assert(!clearButton.update(true, edge + 5029, 5000));
     assert(clearButton.update(true, edge + 5030, 5000));
-    std::cout << "PASS: protocol, authenticated round trip, replay handling, state, and button\n";
+    std::cout << "PASS: protocol, authenticated round trip, fleet routing, replay handling, state, and button\n";
 }

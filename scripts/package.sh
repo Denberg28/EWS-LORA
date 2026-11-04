@@ -10,7 +10,7 @@ esptool="$core_dir/packages/tool-esptoolpy/esptool.py"
 boot_app="$core_dir/packages/framework-arduinoespressif32/tools/partitions/boot_app0.bin"
 mkdir -p dist
 
-for role in beacon receiver; do
+for role in base node rover; do
   build=".pio/build/$role"
   python3 "$esptool" --chip esp32s3 image_info "$build/firmware.bin"
   cp "$build/firmware.bin" "dist/ews-lora-$version-$role-app.bin"
@@ -31,7 +31,6 @@ done
 
 (
   cd dist
-  sha256sum "ews-lora-$version-beacon.bin" "ews-lora-$version-receiver.bin" \
-    "ews-lora-$version-beacon-app.bin" "ews-lora-$version-receiver-app.bin" BUILD.txt > SHA256SUMS
+  sha256sum ews-lora-"$version"-{base,node,rover}{,-app}.bin BUILD.txt > SHA256SUMS
   sha256sum --check SHA256SUMS
 )

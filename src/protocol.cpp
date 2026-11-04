@@ -26,15 +26,17 @@ uint32_t read32(const uint8_t* in) {
 }
 
 ReportBytes encodeReport(const Report& report) {
-    ReportBytes out = {{'E', 'W', 1, static_cast<uint8_t>(report.kind), uint8_t(report.fix)}};
+    ReportBytes out = {{'E', 'W', 2, static_cast<uint8_t>(report.kind), uint8_t(report.fix)}};
     write32(out.data() + 5, report.sequence);
     write32(out.data() + 9, static_cast<uint32_t>(report.latitude));
     write32(out.data() + 13, static_cast<uint32_t>(report.longitude));
+    out[17] = report.rover;
+    out[18] = report.route;
     return out;
 }
 
 bool decodeReport(const uint8_t* in, Report& report) {
-    if (in[0] != 'E' || in[1] != 'W' || in[2] != 1 || in[3] < 1 || in[3] > 3 ||
+    if (in[0] != 'E' || in[1] != 'W' || in[2] != 2 || in[3] < 1 || in[3] > 3 ||
         in[4] > 1) {
         return false;
     }
@@ -46,7 +48,10 @@ bool decodeReport(const uint8_t* in, Report& report) {
     const int64_t longitude = int64_t(read32(in + 13));
     const int64_t lat = latitude > INT32_MAX ? latitude - (INT64_C(1) << 32) : latitude;
     const int64_t lon = longitude > INT32_MAX ? longitude - (INT64_C(1) << 32) : longitude;
-    if (!next.sequence || lat < -9000000 || lat > 9000000 || lon < -18000000 ||
+    next.rover = in[17];
+    next.route = in[18];
+    if (!next.sequence || !next.rover || next.rover > MaxRovers || next.route > MaxNodes ||
+        lat < -9000000 || lat > 9000000 || lon < -18000000 ||
         lon > 18000000 || (next.fix && next.kind != Kind::Sos) ||
         (!next.fix && (lat != 0 || lon != 0))) {
         return false;
@@ -71,12 +76,13 @@ static bool makeTag(const Key& key, const uint8_t* body, uint8_t* output) {
 bool encode(const Key& key, const Message& message, Frame& frame) {
     const auto bytes = encodeReport(message.report);
     Report validated;
-    if (!message.nonce || !decodeReport(bytes.data(), validated)) {
+    if (!message.nonce || (message.forwarded && !message.report.route) || !decodeReport(bytes.data(), validated)) {
         return false;
     }
     std::copy(bytes.begin(), bytes.end(), frame.begin());
+    frame[ReportSize] = message.forwarded;
     for (size_t i = 0; i < 8; ++i) {
-        frame[ReportSize + i] = static_cast<uint8_t>(message.nonce >> (8 * i));
+        frame[ReportSize + 1 + i] = static_cast<uint8_t>(message.nonce >> (8 * i));
     }
     uint8_t hash[32];
     if (!makeTag(key, frame.data(), hash)) {
@@ -91,9 +97,11 @@ bool decode(const Key& key, const uint8_t* data, size_t length, Message& message
         return false;
     }
     Message next;
-    if (!decodeReport(data, next.report)) {
+    if (!decodeReport(data, next.report) || data[ReportSize] > 1 ||
+        (data[ReportSize] && !next.report.route)) {
         return false;
     }
+    next.forwarded = data[ReportSize] != 0;
     uint8_t hash[32];
     if (!makeTag(key, data, hash)) {
         return false;
@@ -103,7 +111,7 @@ bool decode(const Key& key, const uint8_t* data, size_t length, Message& message
         diff |= hash[i] ^ data[BodySize + i];
     }
     for (size_t i = 0; i < 8; ++i) {
-        next.nonce |= uint64_t(data[ReportSize + i]) << (8 * i);
+        next.nonce |= uint64_t(data[ReportSize + 1 + i]) << (8 * i);
     }
     if (diff || !next.nonce) {
         return false;
@@ -141,7 +149,8 @@ bool parseKey(const char* hex, Key& key) {
 }
 
 Arrival classify(const Report& incoming, const Report& stored) {
-    if (!incoming.sequence || incoming.kind == Kind::Ack || incoming.sequence < stored.sequence) {
+    if (!incoming.sequence || incoming.kind == Kind::Ack ||
+        (stored.sequence && incoming.rover != stored.rover) || incoming.sequence < stored.sequence) {
         return Arrival::Reject;
     }
     if (incoming.sequence > stored.sequence) {
@@ -150,9 +159,55 @@ Arrival classify(const Report& incoming, const Report& stored) {
     return encodeReport(incoming) == encodeReport(stored) ? Arrival::Duplicate : Arrival::Reject;
 }
 
-bool matchesAck(const Message& ack, const Message& sent) {
+bool acceptsAtBase(const Message& request) {
+    return request.report.kind != Kind::Ack && request.forwarded == (request.report.route != 0);
+}
+
+Message makeAck(const Message& request) {
+    Message ack;
+    ack.report.kind = Kind::Ack;
+    ack.report.sequence = request.report.sequence;
+    ack.report.rover = request.report.rover;
+    ack.report.route = request.report.route;
+    ack.nonce = request.nonce;
+    return ack;
+}
+
+static bool sameTransaction(const Message& ack, const Message& sent) {
     return ack.report.kind == Kind::Ack && ack.report.sequence == sent.report.sequence &&
+           ack.report.rover == sent.report.rover && ack.report.route == sent.report.route &&
            ack.nonce == sent.nonce && sent.nonce != 0;
+}
+
+bool matchesAck(const Message& ack, const Message& sent) {
+    return sameTransaction(ack, sent) && ack.forwarded == (sent.report.route != 0);
+}
+
+bool Relay::uplink(Message& request, uint8_t node, uint32_t now) {
+    if (!node || request.report.route != node || request.report.kind == Kind::Ack ||
+        request.forwarded ||
+        (used && (!elapsed(now, openedAt, RelayGapMs) || request.nonce == last.nonce))) {
+        return false;
+    }
+    used = true;
+    pending = true;
+    openedAt = now;
+    last = request;
+    request.forwarded = true;
+    return true;
+}
+
+bool Relay::awaiting(uint32_t now) const {
+    return pending && !elapsed(now, openedAt, RelayWindowMs);
+}
+
+bool Relay::downlink(Message& ack, uint32_t now) {
+    if (!awaiting(now) || ack.forwarded || !sameTransaction(ack, last)) {
+        return false;
+    }
+    pending = false;
+    ack.forwarded = true;
+    return true;
 }
 
 bool reserveSequenceBlock(uint32_t highWater, uint32_t& next, uint32_t& limit) {

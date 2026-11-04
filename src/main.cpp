@@ -10,7 +10,7 @@
 
 #include "protocol.h"
 
-#ifdef EWS_BEACON
+#ifdef EWS_ROVER
 #include <TinyGPSPlus.h>
 #include <bootloader_random.h>
 #include <esp_system.h>
@@ -29,12 +29,12 @@ using namespace ews;
 
 constexpr int ButtonPin = 21;
 constexpr int LedPin = 37;
-constexpr uint32_t RetryMs = 20000;
-constexpr uint32_t ReportMs = 30000;
-constexpr uint32_t AckWindowMs = 3000;
-constexpr uint32_t AckFreshMs = 75000;
-constexpr uint32_t ReceiverTxGapMs = 18000;
+constexpr uint32_t AckWindowMs = RelayWindowMs;
+constexpr uint32_t BaseTxGapMs = 18000;
 constexpr uint32_t FixMaxAgeMs = 10000;
+
+uint8_t deviceId = 0;
+uint8_t routeId = 0;
 
 Preferences store;
 Key key{};
@@ -48,7 +48,7 @@ bool provisionEnabled = false;
 bool screenReady = false;
 uint32_t radioAt = 0;
 
-#ifdef EWS_BEACON
+#ifdef EWS_ROVER
 TinyGPSPlus gps;
 HoldButton button;
 Mode mode = Mode::Idle;
@@ -60,14 +60,20 @@ int32_t latitude = 0;
 int32_t longitude = 0;
 Message sent;
 uint32_t sentAt = 0;
-uint32_t lastAckAt = 0;
+uint32_t jitterMs = 0;
 bool sentOnce = false;
 bool waitingAck = false;
 bool recentAck = false;
 bool lastAttemptAcked = false;
+#elif defined(EWS_NODE)
+Relay relay;
+uint32_t forwardedCount = 0;
 #else
-Report received;
-bool restored = false;
+struct RoverRecord {
+    Report report;
+    bool restored = false;
+};
+RoverRecord records[MaxRovers];
 bool ackSent = false;
 uint32_t ackSentAt = 0;
 #endif
@@ -100,18 +106,33 @@ void setStoreFault() {
     Serial.println("STORE ERROR");
 }
 
-bool loadKey() {
-    if (!store.isKey("pair")) {
+bool validIdentity(uint8_t id, uint8_t route) {
+#if defined(EWS_ROVER)
+    return id >= 1 && id <= MaxRovers && route <= MaxNodes;
+#elif defined(EWS_NODE)
+    return id >= 1 && id <= MaxNodes && route == 0;
+#else
+    return id == 0 && route == 0;
+#endif
+}
+
+bool loadConfig() {
+    if (!store.isKey("config")) {
         return false;
     }
-    if (store.getBytesLength("pair") != key.size() ||
-        store.getBytes("pair", key.data(), key.size()) != key.size()) {
+    uint8_t bytes[KeySize + 2];
+    if (store.getBytesLength("config") != sizeof(bytes) ||
+        store.getBytes("config", bytes, sizeof(bytes)) != sizeof(bytes) ||
+        !validIdentity(bytes[0], bytes[1])) {
         setStoreFault();
         return false;
     }
+    deviceId = bytes[0];
+    routeId = bytes[1];
     uint8_t bits = 0;
-    for (const auto byte : key) {
-        bits |= byte;
+    for (size_t i = 0; i < key.size(); ++i) {
+        key[i] = bytes[i + 2];
+        bits |= key[i];
     }
     if (!bits) {
         setStoreFault();
@@ -120,7 +141,7 @@ bool loadKey() {
 }
 
 void provision() {
-    static char line[69];
+    static char line[73];
     static size_t size = 0;
     static bool overflow = false;
     for (unsigned i = 0; i < 96 && Serial.available(); ++i) {
@@ -134,21 +155,26 @@ void provision() {
             continue;
         }
         line[size] = '\0';
-        const bool valid = !overflow && size == 68 && std::strncmp(line, "KEY ", 4) == 0 &&
-                           parseKey(line + 4, key);
+        const uint8_t id = static_cast<uint8_t>(line[4] - '0');
+        const uint8_t route = static_cast<uint8_t>(line[6] - '0');
+        const bool valid = !overflow && size == 72 && std::strncmp(line, "CFG ", 4) == 0 &&
+                           line[5] == ' ' && line[7] == ' ' && validIdentity(id, route) &&
+                           parseKey(line + 8, key);
         memset(line, 0, sizeof(line));
         size = 0;
         overflow = false;
         if (!valid) {
-            Serial.println("INVALID KEY FORMAT");
+            Serial.println("INVALID CONFIG");
             continue;
         }
-        if (store.putBytes("pair", key.data(), key.size()) != key.size()) {
+        uint8_t bytes[KeySize + 2] = {id, route};
+        memcpy(bytes + 2, key.data(), key.size());
+        if (store.putBytes("config", bytes, sizeof(bytes)) != sizeof(bytes)) {
             setStoreFault();
             return;
         }
         provisionEnabled = false;
-        Serial.println("KEY STORED - RESET BOARD");
+        Serial.println("CONFIG STORED - RESET BOARD");
         return;
     }
 }
@@ -157,7 +183,7 @@ void radioFault(int16_t status) {
     radioReady = false;
     radioAt = millis();
     Serial.printf("RADIO ERROR %d\n", status);
-#ifdef EWS_BEACON
+#ifdef EWS_ROVER
     waitingAck = false;
     lastAttemptAcked = false;
 #endif
@@ -187,7 +213,7 @@ void initRadio(uint32_t now) {
         radioFault(status);
         return;
     }
-#ifdef EWS_BEACON
+#ifdef EWS_ROVER
     radioReady = true;
 #else
     radioReady = listen();
@@ -224,7 +250,7 @@ bool transmit(const Message& message) {
     return true;
 }
 
-#ifdef EWS_BEACON
+#ifdef EWS_ROVER
 bool saveBeacon(Mode nextMode, uint32_t limit) {
     uint8_t bytes[5] = {static_cast<uint8_t>(nextMode)};
     write32(bytes + 1, limit);
@@ -313,9 +339,6 @@ void runRole(uint32_t now) {
     if (!radioReady || mode == Mode::Idle) {
         return;
     }
-    if (recentAck && elapsed(now, lastAckAt, AckFreshMs)) {
-        recentAck = false;
-    }
     if (waitingAck) {
         if (elapsed(now, sentAt, AckWindowMs)) {
             waitingAck = false;
@@ -325,7 +348,6 @@ void runRole(uint32_t now) {
             Message ack;
             if (receive(ack) && matchesAck(ack, sent)) {
                 waitingAck = false;
-                lastAckAt = millis();
                 recentAck = true;
                 lastAttemptAcked = true;
                 Serial.printf("RX ACK %lu\n", static_cast<unsigned long>(sent.report.sequence));
@@ -336,11 +358,15 @@ void runRole(uint32_t now) {
         }
         return;
     }
-    if (sentOnce && !elapsed(now, sentAt, lastAttemptAcked ? ReportMs : RetryMs)) {
+    const uint32_t retryMs = routeId ? 40000 : 20000;
+    const uint32_t interval = retryMs + jitterMs + (lastAttemptAcked ? 10000 : 0);
+    if (sentOnce && !elapsed(now, sentAt, interval)) {
         return;
     }
 
     Report report;
+    report.rover = deviceId;
+    report.route = routeId;
     report.kind = mode == Mode::Sos ? Kind::Sos : Kind::Clear;
     report.sequence = sent.report.sequence;
     report.fix = mode == Mode::Sos && fixValid;
@@ -360,6 +386,7 @@ void runRole(uint32_t now) {
     if (!sent.nonce) {
         return;
     }
+    jitterMs = static_cast<uint32_t>(sent.nonce % 8000);
     sentAt = millis();
     sentOnce = true;
     if (transmit(sent) && listen()) {
@@ -374,91 +401,151 @@ void roleDisplay(uint32_t now) {
     row(3, mode == Mode::Idle ? "HOLD 2s FOR SOS" : recentAck ? "RX ACK SEEN" : "WAIT ACK");
     row(4, fixValid ? "GPS FIX" : "NO GPS FIX");
     row(5, mode == Mode::Sos ? "HOLD 5s: CLEAR" : mode == Mode::Clear ? "HOLD 2s: SOS" : "");
-    row(6, recentAck ? "RECEIPT ONLY" : "");
+    char identity[17];
+    snprintf(identity, sizeof(identity), "ID %u / %s %u", deviceId,
+             routeId ? "NODE" : "DIRECT", routeId);
+    row(6, identity);
     digitalWrite(LedPin, mode != Mode::Idle && (recentAck || (now / 250) % 2));
 }
+#elif defined(EWS_NODE)
+void loadRole() {}
+
+void runRole(uint32_t now) {
+    Message message;
+    if (!radioReady || !receive(message)) {
+        return;
+    }
+    const bool isAck = message.report.kind == Kind::Ack;
+    if (!(isAck ? relay.downlink(message, now) : relay.uplink(message, deviceId, now))) {
+        return;
+    }
+    delay(100);  // Let the previous sender turn around before a relay transmission.
+    if (transmit(message)) {
+        ++forwardedCount;
+        listen();
+        Serial.printf("FORWARDED %s rover=%u seq=%lu\n", isAck ? "ACK" : "REPORT",
+                      message.report.rover, static_cast<unsigned long>(message.report.sequence));
+    }
+}
+
+void roleDisplay(uint32_t now) {
+    char line[17];
+    snprintf(line, sizeof(line), "NODE %u", deviceId);
+    row(2, line);
+    const bool awaiting = relay.awaiting(now);
+    row(3, awaiting ? "WAITING BASE ACK" : "LISTENING");
+    snprintf(line, sizeof(line), "FWD %lu", static_cast<unsigned long>(forwardedCount));
+    row(4, line);
+    digitalWrite(LedPin, awaiting);
+}
 #else
-void logReport(const char* action) {
-    Serial.printf("%s %s seq=%lu", action, received.kind == Kind::Sos ? "SOS" : "CLEAR",
-                  static_cast<unsigned long>(received.sequence));
-    if (received.fix) {
-        Serial.printf(" lat=%.5f lon=%.5f", received.latitude / 100000.0, received.longitude / 100000.0);
-    } else if (received.kind == Kind::Sos) {
+void reportKey(uint8_t rover, char (&out)[5]) {
+    snprintf(out, sizeof(out), "r%u", rover);
+}
+
+void logReport(const char* action, const Report& report) {
+    Serial.printf("%s %s rover=%u route=%u seq=%lu", action,
+                  report.kind == Kind::Sos ? "SOS" : "CLEAR", report.rover, report.route,
+                  static_cast<unsigned long>(report.sequence));
+    if (report.fix) {
+        Serial.printf(" lat=%.5f lon=%.5f", report.latitude / 100000.0, report.longitude / 100000.0);
+    } else if (report.kind == Kind::Sos) {
         Serial.print(" NO GPS FIX");
     }
     Serial.println();
 }
 
 void loadRole() {
-    if (!store.isKey("rx-v1")) {
-        return;
+    for (uint8_t id = 1; id <= MaxRovers; ++id) {
+        char storageKey[5];
+        reportKey(id, storageKey);
+        if (!store.isKey(storageKey)) {
+            continue;
+        }
+        auto& record = records[id - 1];
+        ReportBytes bytes;
+        if (store.getBytesLength(storageKey) != bytes.size() ||
+            store.getBytes(storageKey, bytes.data(), bytes.size()) != bytes.size() ||
+            !decodeReport(bytes.data(), record.report) || record.report.kind == Kind::Ack ||
+            record.report.rover != id) {
+            setStoreFault();
+            return;
+        }
+        record.restored = true;
+        logReport("RESTORED", record.report);
     }
-    ReportBytes bytes;
-    if (store.getBytesLength("rx-v1") != bytes.size() ||
-        store.getBytes("rx-v1", bytes.data(), bytes.size()) != bytes.size() ||
-        !decodeReport(bytes.data(), received) || received.kind == Kind::Ack) {
-        setStoreFault();
-        return;
-    }
-    restored = true;
-    logReport("RESTORED");
 }
 
 void runRole(uint32_t now) {
-    if (!radioReady) {
-        return;
-    }
     Message request;
-    if (!receive(request)) {
+    if (!radioReady || !receive(request) || !acceptsAtBase(request)) {
         return;
     }
-    const Arrival arrival = classify(request.report, received);
+    auto& record = records[request.report.rover - 1];  // decode validates the ID.
+    const Arrival arrival = classify(request.report, record.report);
     if (arrival == Arrival::Reject) {
         return;
     }
     if (arrival == Arrival::New) {
+        char storageKey[5];
+        reportKey(request.report.rover, storageKey);
         const auto bytes = encodeReport(request.report);
-        if (store.putBytes("rx-v1", bytes.data(), bytes.size()) != bytes.size()) {
+        if (store.putBytes(storageKey, bytes.data(), bytes.size()) != bytes.size()) {
             setStoreFault();
             return;
         }
-        received = request.report;
-        restored = false;
+        record.report = request.report;
+        record.restored = false;
     }
-    if (!ackSent || elapsed(now, ackSentAt, ReceiverTxGapMs)) {
-        Message ack;
-        ack.report.kind = Kind::Ack;
-        ack.report.sequence = request.report.sequence;
-        ack.nonce = request.nonce;
-        delay(100);  // Allow beacon to switch from transmit to receive.
+    if (!ackSent || elapsed(now, ackSentAt, BaseTxGapMs)) {
+        delay(100);
         ackSentAt = millis();
         ackSent = true;
-        if (transmit(ack)) {
+        if (transmit(makeAck(request))) {
             listen();
         }
     }
     if (arrival == Arrival::New) {
-        logReport("RECEIVED");
+        logReport("RECEIVED", record.report);
     }
 }
 
 void roleDisplay(uint32_t now) {
-    const bool active = received.sequence && received.kind == Kind::Sos;
-    row(2, !received.sequence ? "LISTENING" : active ? "SOS RECEIVED" : "REMOTE CLEAR");
-    row(3, restored ? "RESTORED RECORD" : "");
-    if (active && received.fix) {
-        char coords[17];
-        snprintf(coords, sizeof(coords), "LAT %+.5f", received.latitude / 100000.0);
-        row(4, coords);
-        snprintf(coords, sizeof(coords), "LON %+.5f", received.longitude / 100000.0);
-        row(5, coords);
-        row(6, "LAST REPORTED");
-    } else {
-        row(4, active ? "NO GPS FIX" : "");
+    const RoverRecord* active[MaxRovers];
+    uint8_t count = 0;
+    for (const auto& record : records) {
+        if (record.report.sequence && record.report.kind == Kind::Sos) {
+            active[count++] = &record;
+        }
+    }
+    if (!count) {
+        row(2, "LISTENING");
+        row(3, "NO ACTIVE SOS");
+        row(4, "");
         row(5, "");
         row(6, "");
+        digitalWrite(LedPin, LOW);
+        return;
     }
-    digitalWrite(LedPin, active && (now / 250) % 2);
+
+    const auto& record = *active[(now / 3500) % count];
+    char line[17];
+    snprintf(line, sizeof(line), "SOS R%u (%u TOTAL)", record.report.rover, count);
+    row(2, line);
+    row(3, record.restored ? "RESTORED RECORD" : "LAST REPORTED");
+    if (record.report.fix) {
+        snprintf(line, sizeof(line), "LAT %+.5f", record.report.latitude / 100000.0);
+        row(4, line);
+        snprintf(line, sizeof(line), "LON %+.5f", record.report.longitude / 100000.0);
+        row(5, line);
+    } else {
+        row(4, "NO GPS FIX");
+        row(5, "");
+    }
+    snprintf(line, sizeof(line), record.report.route ? "VIA NODE %u" : "DIRECT LINK",
+             record.report.route);
+    row(6, line);
+    digitalWrite(LedPin, (now / 250) % 2);
 }
 #endif
 
@@ -469,8 +556,8 @@ void updateDisplay(uint32_t now) {
     }
     lastDraw = now;
     if (storeFault || !provisioned) {
-        row(2, storeFault ? "STORE ERROR" : "PAIR KEY NEEDED");
-        row(3, storeFault ? "RADIO DISABLED" : provisionEnabled ? "USB KEY MODE" : "RESET TO START");
+        row(2, storeFault ? "STORE ERROR" : "CONFIG NEEDED");
+        row(3, storeFault ? "RADIO DISABLED" : provisionEnabled ? "USB CONFIG MODE" : "RESET TO START");
         row(4, "");
         row(5, "");
         row(6, "");
@@ -509,18 +596,20 @@ void setup() {
     } else {
         Serial.println("OLED ERROR - USE LED AND USB");
     }
-#ifdef EWS_BEACON
-    row(0, "EWS LORA BEACON");
+#ifdef EWS_ROVER
+    row(0, "EWS LORA ROVER");
     Serial1.begin(9600, SERIAL_8N1, 44, -1);
+#elif defined(EWS_NODE)
+    row(0, "EWS LORA NODE");
 #else
-    row(0, "EWS LORA RX");
+    row(0, "EWS LORA BASE");
 #endif
     SPI.begin(5, 3, 6, 7);
-    if (storeFault || !store.begin("ews", false)) {
+    if (storeFault || !store.begin("ews2", false)) {
         setStoreFault();
         return;
     }
-    provisioned = loadKey();
+    provisioned = loadConfig();
     if (provisioned) {
         loadRole();
     } else {

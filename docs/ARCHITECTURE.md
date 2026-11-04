@@ -1,31 +1,30 @@
-# EWS LORA 0.1 design
+# EWS LORA fleet candidate design
 
-Baseline: public Denberg28/EWS-LORA, default branch main, empty before the initial AGENTS.md commit 305c39a0b28ecc382a930654983769278a8fcbb5. There is no prior firmware, package identity, signing key, or known-good device image.
+Baseline: v0.1.0-rc.1 at 9e4e7787d949c26323d58090e0b70ed449405dcd, a software-verified direct beacon/receiver pair. It has no physical acceptance evidence. This update retains that tagged baseline and introduces wire v2 for one staffed Base, up to eight numbered SOS Rovers and up to eight numbered Relay Nodes. Roles are provisioned locally. A Rover selects a direct link or exactly one Node. There is no automatic failover, multi-hop mesh, internet gateway, vehicle control, or public rescue-service integration.
 
-## Scope
+| Event | Rover | Node | Base |
+| --- | --- | --- | --- |
+| Hold 2 s | Persist SOS and transmit at the next eligible slot even without GPS | Forward only for its own node ID | Persist by rover ID before ACK |
+| Hold 5 s during SOS | Persist CLEAR and retry until ACK | Same path as SOS | Clear only the named rover and persist replay state |
+| No current ACK | Show WAIT ACK and retry | Expire the transaction window | Retain last saved event |
+| New or expired fix | Update on next report; fixes expire after 10 s | Forward validated report | Show last reported coordinates or NO GPS FIX |
+| Reboot | Resume active SOS/CLEAR and reserve a higher sequence block | Listen again and await Rover retry | Restore per-rover records and mark them restored |
+| I/O fault | Retain alert and retry radio setup | Retry radio setup | Retain saved events and retry radio setup |
+| Storage fault | Show STORE ERROR and disable RF | Disable RF if config storage fails | Fail closed and avoid ACKing failed writes |
 
-Two LilyGO T3-S3 ESP32-S3 boards with SX1262 915 MHz hardware. One portable beacon and one staffed receiver form a private, direct LoRa pair. A tactile switch activates the beacon. An optional external 3.3 V logic NMEA GNSS receiver supplies coordinates. The OLED and onboard LED work offline. There is no phone, cellular, cloud, GPS-by-LoRa triangulation, relay, mesh, multi-beacon dispatch, or integration with public rescue services. The receiver should be staffed for the entire controlled test.
+A two-second hold during pending CLEAR starts a new SOS. A button held at startup cannot activate the Rover until released. Local users control SOS and clear. Only the Base issues an ACK. The firmware has no actuators or motion authority. The loop task uses an 8-second watchdog, bounded RadioLib packet TX, and debounced button handling.
 
-## Operation and recovery
+## Routing and timing
 
-| Event | Beacon | Receiver |
-| --- | --- | --- |
-| Hold 2 s | Latch SOS in flash, send now even with no fix | Authenticate and persist alert before sending ACK |
-| No ACK | Show WAIT ACK, repeat every 20 s | Continue listening |
-| ACK for current transmission | Show RX ACK SEEN, send every 30 s while ACKs continue | Keep alert latched. Show latest reported coordinates or NO GPS FIX |
-| ACK goes stale | Show WAIT ACK after 75 s without an ACK. A missed 3 s response window already restores 20 s retries | Keep last stored report |
-| Fix becomes valid or stale | Update at next report. Expire fixes older than 10 s | Display the state sent in the report |
-| Hold 5 s on an active beacon | Persist CLEAR and retry every 20 s until ACK | Persist and show REMOTE CLEAR. Operator verifies incident separately |
-| Reboot | Resume pending SOS or CLEAR from NVS with a new sequence | Restore last stored record and mark RESTORED until a newer report |
-| Radio init/I/O fault | Show radio fault and retry setup every 2 s, retain stored alert | Same, retain stored record |
-| Storage fault | Show STORE ERROR and inhibit radio. Recover after fault repair/reboot | Same. Never ACK a write that failed |
+- Direct Rover sends route 0. Base accepts the unforwarded report and returns an unforwarded ACK. Routed Rover sends a nonzero route. Only the matching Node forwards that request with the hop bit set. Base accepts the routed report only with the hop bit set. The same Node then forwards the corresponding Base ACK with the hop bit set. Rover accepts an ACK only on the configured path.
+- Each ACK must match rover ID, route, report sequence and a fresh 64-bit per-transmission nonce. Each Node holds one in-flight transaction for up to 4 seconds. It forwards the matching ACK once and rejects already-forwarded frames. A route contains at most one relay in each direction.
+- Direct retry slots are 20–28 seconds, routed retry slots 40–48 seconds. After a successful ACK, reporting slots are respectively 30–38 and 50–58 seconds. Independent random jitter reduces repeated collisions. Local mode changes respect the prior transmission slot. The Base limits ACK starts to one per 18 seconds and each Node limits uplink transaction starts to one per 38 seconds. A busy Base can save a report without ACK. Simultaneous alerts compete for airtime. ID limits describe storage and addressing capacity. Per-route service capacity and multi-alert latency require measurement.
+- RF parameters are 916.0 MHz by default, 10 dBm conducted, SF8, 125 kHz BW, CR 4/5, preamble 8, explicit header, CRC, private sync word 0x12. Limits are design defaults during uptime, and resetting a board clears its airtime timers. Verify jurisdictional and antenna requirements before RF operation.
 
-Local users control activation and clearing. A 2 s hold during pending CLEAR starts a new SOS. A local mode change respects the 20 s minimum between transmissions during uptime, and the receiver applies an 18 s ACK rate limit during uptime. The paired receiver can acknowledge only. There are no actuators, remote commands, handover, or motion outputs. Hold-at-boot is reserved for provisioning a blank board. The button must be released after startup before it can trigger an action. An 8 s ESP task watchdog reboots a stalled main loop. RadioLib's synchronous TX is bounded by its packet timeout. Each TX opens a 3 s ACK window; signed ACKs must match the exact 64-bit transmission nonce and 32-bit sequence. An ACK confirms durable receiver receipt. Dispatch and human response require separate action.
+## Wire and persistence
 
-## Interfaces
+44-byte datagram. Bytes 0–1 magic EW, 2 version 2, 3 kind (SOS 1, CLEAR 2, ACK 3), 4 fix flag, 5–8 nonzero monotonic report sequence, 9–12 signed latitude and 13–16 signed longitude in degrees × 100,000, 17 rover ID, 18 route ID, 19 hop bit, 20–27 nonzero nonce, 28–43 first 16 bytes of HMAC-SHA256 over bytes 0–27. Multi-byte values are little-endian. Coordinates are zero when absent. ACK and CLEAR carry no fix.
 
-- P2P LoRa, configurable center frequency, SF8, 125 kHz BW, CR 4/5, preamble 8, explicit header, PHY CRC, private sync word 0x12. The candidate profile is 916.0 MHz and 10 dBm conducted. Verify authorized operating parameters before transmitting. One antenna and one receiver per pair.
-- 41-byte version-1 datagram, little-endian. Bytes 0–1 magic EW, 2 version, 3 type (SOS=1, CLEAR=2, ACK=3), 4 fix flag (0/1), 5–8 nonzero monotonic report sequence, 9–12 signed latitude and 13–16 signed longitude in degrees × 100,000 (zero when absent), 17–24 nonzero fresh random nonce, 25–40 first 16 bytes of HMAC-SHA256 over bytes 0–24. ACK and CLEAR carry no coordinates. ACK copies report sequence and nonce.
-- Each pair uses its own random 256-bit key, stored in NVS via a physically enabled USB-only provisioning session. Payload coordinates are readable to RF listeners. There is no key export, RF provisioning, or encryption. Protect access to hardware, local logs and the provisioning key. ESP32 flash encryption is outside this MVP.
-- The beacon reserves sequence values in blocks of 256 via NVS before use and skips unused values after reset. Its active mode and reservation high-water mark live in one record. One report version is reused for identical retransmissions. Changes in fix availability or rounded coordinates get a new sequence. The receiver durably stores the most recent changed report before ACK. It rejects older sequences and conflicting payloads at the current sequence. Authenticated exact duplicates may receive ACK at a bounded rate, but never renew stored state or operator freshness. Power loss between save and ACK is handled by retransmission.
-- Coordinates are last reported and have no authenticated wall-clock timestamp. The receiver never implies a live fix or range guarantee. Duplicate RF replay can consume airtime. Interference, jamming, physical key extraction, traffic observation and lost receivers require operational controls. The USB receiver log contains coordinates and is intended for local test use.
+Network devices share one random 256-bit key and trust other provisioned devices. Anyone with that key can impersonate network roles. Use distinct keys for distinct networks and protect access to boards, keys and USB logs. RF coordinates are authenticated and readable. USB configuration requires a physical boot condition and a blank configuration. Firmware has no key export and does not enable flash encryption. Address uniqueness is an installation responsibility.
+
+The Rover reserves sequences in durable 256-entry blocks. The Base persists each Rover's latest canonical report and rejects older sequences and conflicting duplicates. A repeat of the current report can receive a new ACK for the current attempt without rewriting flash. Freshly heard RF and wall-clock age are separate concerns. The Base shows coordinates as last reported. A replay or RF interference can consume airtime without changing an older persisted state. Physical backup communications and measured coverage remain required.
