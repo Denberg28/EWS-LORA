@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.5.0-rc.1
+
+- Collect same-attempt direct RF readings from the Base and relay nodes when an SOS has no GPS fix.
+- Add a calibrated RSSI search-area estimate, anchor CSV import and a no-GPS demo scenario.
+- Keep RF estimates separate from GPS tracks and incident acknowledgement.
+
+
 ## v0.4.0-rc.1
 
 - Add a read-only Windows x64 monitor with rover contact, SOS state, relay heartbeats, offline movement trails, demo mode and GeoJSON export.

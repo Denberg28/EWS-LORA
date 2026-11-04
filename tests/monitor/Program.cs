@@ -72,3 +72,33 @@ Require(fleet.Tracks[0].Count == 5 && fleet.Tracks[0][4].Leg != fleet.Tracks[0][
 Feed(Frame(position, 3, board: 23));
 Require(fleet.Tracks[0].Count == 1, "Changing to another Base isolates session tracks.");
 Console.WriteLine("Monitor stream and tracking checks passed.");
+
+using var anchorInput = new StringReader(SignalLocation.Header + "\n" +
+    "0,12.5,123.5,-80,3,6\n1,12.5,123.502,-80,3,6\n2,12.502,123.501,-80,3,6");
+Anchor[] anchors = SignalLocation.ReadAnchors(anchorInput);
+var samples = new int[9];
+foreach (Anchor a in anchors)
+{
+    double x = (a.Lon - 123.501) * 111195 * Math.Cos(12.5 * Math.PI / 180);
+    double y = (a.Lat - 12.50065) * 111195;
+    samples[a.Id] = (int)Math.Round(10 * (a.ReferenceRssi - 10 * a.Exponent *
+        Math.Log10(Math.Sqrt(x * x + y * y) / 100)));
+}
+var evidence = new SignalEvidence(12, samples);
+SignalEstimate? estimate = SignalLocation.Locate(anchors, evidence);
+Require(estimate != null && Math.Abs(estimate.Position.Lat - 1250065) <= 4 &&
+        Math.Abs(estimate.Position.Lon - 12350100) <= 4 && estimate.Radius >= 25,
+    "Calibrated synthetic readings should locate the target and return an area.");
+Require(SignalLocation.Locate(anchors.Take(2).ToArray(), evidence) == null,
+    "Two anchors must not produce an estimate.");
+Require(SignalLocation.Locate(anchors.Select(a => a with { Lat = 12.5 }).ToArray(), evidence) == null,
+    "Collinear anchors must not produce an estimate.");
+Require(SignalLocation.Locate(anchors, new(12, [-1400, -1400, -1400, 0, 0, 0, 0, 0, 0])) == null,
+    "Incompatible readings must not produce an estimate.");
+string raw = $"EWSL,A,1,12,{string.Join(",", samples)}\r\n";
+Feed(Frame(position, 5, board: 23).Replace("EWS1,E", raw + "EWS1,E"));
+Require(fleet.Latest!.Signals[0]?.Rssi.SequenceEqual(samples) == true,
+    "The USB snapshot must carry all readings as a separate observation.");
+Feed(Frame(position, 6, board: 23).Replace("EWS1,E", raw.Replace(",12,", ",75,") + "EWS1,E"));
+Require(fleet.Latest!.Signals[0] == null, "Expired evidence must not survive a new snapshot.");
+Console.WriteLine("RF signal location checks passed.");

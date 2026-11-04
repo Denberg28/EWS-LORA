@@ -8,5 +8,6 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="../../monitor/Telemetry.cs" Link="Telemetry.cs" />
+    <Compile Include="../../monitor/SignalLocation.cs" Link="SignalLocation.cs" />
   </ItemGroup>
 </Project>

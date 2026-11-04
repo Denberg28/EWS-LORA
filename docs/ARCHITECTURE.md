@@ -41,3 +41,26 @@ Only the Base publishes the USB monitor stream at 115200. A two-second cycle sta
 - Node row: `EWS1,N,id,heartbeat_age,forward_age`. Forwarding age comes from accepted routed rover traffic. The two ages are independent.
 
 The monitor commits complete validated frames only. It preserves a saved SOS across overdue contact, no fix and USB loss. It marks rover contact overdue at 170 seconds and node evidence overdue at 190 seconds. Fix loss, a long gap between fixes, Base reboot and USB interruption separate trail segments. The Base retains only its latest observation per device in RAM. The Windows app retains its bounded track history in RAM and writes coordinates only on explicit GeoJSON export or clipboard copy. No internet connection is required for tracking.
+
+## No-fix SOS signal evidence
+
+Kind 7 uses the wire-v3 envelope and HMAC. It carries the original SOS rover
+ID, incident sequence and attempt nonce. The route byte identifies the
+measuring node, the latitude word holds signed RSSI in tenths of dBm, and the
+name, longitude, fix and hop flag are zero. Only receivers of an unforwarded,
+authenticated no-fix SOS measure it. The Base measures its own direct reception
+as anchor zero, even if incident acceptance must wait for the assigned relay.
+
+Nodes send at most one queued observation in slots beginning 4.6 seconds after
+reception, spaced 450 ms by provisioned ID. They skip missed slots and defer to
+incident transactions. The Base matches only the current accepted attempt,
+accepts one report per node, closes the collection window at 9.5 seconds and
+expires it at 75 seconds. GPS recovery and CLEAR remove evidence. Observation
+traffic is best-effort and carries no ACK or authority to create, clear or
+update a saved incident.
+
+Optional USB rows are `EWSL,A,rover,age,base,node1,...,node8` between the final
+node row and the end marker. Older monitors ignore the rows. The desktop
+requires at least three surveyed, calibrated and non-collinear receivers and
+suppresses unbounded, out-of-layout or inconsistent solutions. It draws a
+separate model-derived search radius. Physical RF error may exceed this radius.

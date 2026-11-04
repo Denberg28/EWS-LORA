@@ -95,6 +95,10 @@ uint32_t forwardedCount = 0;
 TelemetryCursor relayedPositions[MaxRovers];
 uint32_t lastPositionRelay = 0;
 bool positionRelayed = false;
+Message pendingSignal;
+uint32_t signalReceivedAt = 0;
+uint32_t lastSignalTx = 0;
+bool signalSent = false;
 #else
 bool ackSent = false;
 uint32_t ackSentAt = 0;
@@ -272,7 +276,7 @@ void initRadio(uint32_t now) {
     }
 }
 
-bool receive(Message& message) {
+bool receive(Message& message, int16_t* signal = nullptr) {
     if (!digitalRead(33)) {
         return false;
     }
@@ -281,6 +285,9 @@ bool receive(Message& message) {
     if (radio.getPacketLength() == frame.size()) {
         valid = radio.readData(frame.data(), frame.size()) == RADIOLIB_ERR_NONE &&
                 decode(key, frame.data(), frame.size(), message);
+    }
+    if (valid && signal && needsSignal(message) && !message.forwarded) {
+        *signal = static_cast<int16_t>(radio.getRSSI(true) * 10);
     }
     listen();
     return valid;
@@ -696,12 +703,30 @@ void runRole(uint32_t now) {
     if (!radioReady) {
         return;
     }
-    const bool received = receive(message);
+    int16_t signal = 0;
+    const bool received = receive(message, &signal);
+    now = millis();
     if (!radioReady) {
         return;
     }
     if (!received) {
-        if (!relay.awaiting(now)) {
+        if (pendingSignal.nonce) {
+            const uint32_t slot = SignalStartMs + (identity.id - 1) * SignalSlotMs;
+            if (elapsed(now, signalReceivedAt, slot)) {
+                const Message next = pendingSignal;
+                pendingSignal.nonce = 0;
+                if (!elapsed(now, signalReceivedAt, slot + 125) && !relay.awaiting(now) &&
+                    (!signalSent || elapsed(now, lastSignalTx, 18000))) {
+                    lastSignalTx = now;
+                    signalSent = true;
+                    if (transmit(next)) {
+                        listen();
+                    }
+                    return;
+                }
+            }
+        }
+        if (!relay.awaiting(now) && !pendingSignal.nonce) {
             Report status;
             status.kind = Kind::NodeStatus;
             status.rover = identity.id;
@@ -709,8 +734,14 @@ void runRole(uint32_t now) {
         }
         return;
     }
+    if (needsSignal(message) && !message.forwarded && validSignal(signal) &&
+        (!pendingSignal.nonce || elapsed(now, signalReceivedAt, SignalWindowMs)) &&
+        (!signalSent || elapsed(now, lastSignalTx, 13000))) {
+        pendingSignal = makeSignal(message, identity.id, signal);
+        signalReceivedAt = now;
+    }
     if (message.report.kind == Kind::Position) {
-        if (!message.forwarded && message.report.route == identity.id && !relay.awaiting(now) &&
+        if (!message.forwarded && !pendingSignal.nonce && message.report.route == identity.id && !relay.awaiting(now) &&
             (!positionRelayed || elapsed(now, lastPositionRelay, 12000)) &&
             relayedPositions[message.report.rover - 1].accept(message)) {
             message.forwarded = true;
@@ -753,8 +784,17 @@ void loadRole() { loadRecords(); }
 
 void runRole(uint32_t now) {
     Message request;
-    if (!radioReady || !receive(request)) {
+    int16_t signal = 0;
+    if (!radioReady || !receive(request, &signal)) {
         return;
+    }
+    now = millis();
+    if (request.report.kind == Kind::Signal) {
+        collectSignal(request, now);
+        return;
+    }
+    if (needsSignal(request) && !request.forwarded && validSignal(signal)) {
+        rememberDirectSignal(request, signal, now);
     }
     if (acceptsTelemetryAtBase(request)) {
         observeTelemetry(request);
@@ -767,6 +807,7 @@ void runRole(uint32_t now) {
     if (arrival == Arrival::Reject) {
         return;
     }
+    startSignalCollection(request, now);
     if (radioReady && (!ackSent || elapsed(now, ackSentAt, BaseTxGapMs))) {
         delay(100);
         ackSentAt = millis();

@@ -37,7 +37,7 @@ ReportBytes encodeReport(const Report& report) {
 }
 
 bool decodeReport(const uint8_t* in, Report& report) {
-    if (in[0] != 'E' || in[1] != 'W' || in[2] != 3 || in[3] < 1 || in[3] > 6 ||
+    if (in[0] != 'E' || in[1] != 'W' || in[2] != 3 || in[3] < 1 || in[3] > 7 ||
         in[4] > 1) {
         return false;
     }
@@ -61,7 +61,9 @@ bool decodeReport(const uint8_t* in, Report& report) {
     if (!next.sequence || !next.rover || next.rover > MaxRovers || next.route > MaxNodes ||
         lat < -9000000 || lat > 9000000 || lon < -18000000 ||
         lon > 18000000 || (next.fix && isAck(next.kind)) ||
-        (!next.fix && (lat != 0 || lon != 0)) ||
+        (!next.fix && next.kind != Kind::Signal && (lat != 0 || lon != 0)) ||
+        (next.kind == Kind::Signal &&
+         (next.fix || !next.route || next.name[0] || lon || !validSignal(static_cast<int32_t>(lat)))) ||
         (next.kind == Kind::NodeStatus && (next.fix || next.route || next.name[0]))) {
         return false;
     }
@@ -104,6 +106,33 @@ bool isAck(Kind kind) {
 
 bool isIncident(Kind kind) {
     return kind == Kind::Sos || kind == Kind::Clear;
+}
+
+bool validSignal(int32_t deciDbm) {
+    return deciDbm >= -1450 && deciDbm <= -200;
+}
+
+bool needsSignal(const Message& message) {
+    return message.report.kind == Kind::Sos && !message.report.fix;
+}
+
+Message makeSignal(const Message& sos, uint8_t node, int16_t deciDbm) {
+    Message observation;
+    observation.report.kind = Kind::Signal;
+    observation.report.rover = sos.report.rover;
+    observation.report.route = node;
+    observation.report.sequence = sos.report.sequence;
+    observation.report.latitude = deciDbm;
+    observation.nonce = sos.nonce;
+    return observation;
+}
+
+bool matchesSignal(const Message& observation, const Message& sos) {
+    return observation.report.kind == Kind::Signal && !observation.forwarded &&
+           observation.report.route >= 1 && observation.report.route <= MaxNodes &&
+           validSignal(observation.report.latitude) && needsSignal(sos) && sos.nonce &&
+           observation.report.rover == sos.report.rover &&
+           observation.report.sequence == sos.report.sequence && observation.nonce == sos.nonce;
 }
 
 bool acceptsTelemetryAtBase(const Message& message) {
@@ -151,7 +180,7 @@ static bool makeTag(const Key& key, const uint8_t* body, uint8_t* output) {
 bool encode(const Key& key, const Message& message, Frame& frame) {
     const auto bytes = encodeReport(message.report);
     Report validated;
-    if (!message.nonce || message.report.name.back() != 0 || (message.forwarded && !message.report.route) || !decodeReport(bytes.data(), validated)) {
+    if (!message.nonce || message.report.name.back() != 0 || (message.forwarded && (!message.report.route || message.report.kind == Kind::Signal)) || !decodeReport(bytes.data(), validated)) {
         return false;
     }
     std::copy(bytes.begin(), bytes.end(), frame.begin());
@@ -173,7 +202,7 @@ bool decode(const Key& key, const uint8_t* data, size_t length, Message& message
     }
     Message next;
     if (!decodeReport(data, next.report) || data[ReportSize] > 1 ||
-        (data[ReportSize] && !next.report.route)) {
+        (data[ReportSize] && (!next.report.route || next.report.kind == Kind::Signal))) {
         return false;
     }
     next.forwarded = data[ReportSize] != 0;
