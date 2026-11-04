@@ -57,7 +57,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           SOURCE: ${{ github.sha }}
-          TAG: v0.2.0-rc.1
+          TAG: v0.3.0-rc.1
         run: |
           set -euo pipefail
           cd dist

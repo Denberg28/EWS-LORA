@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.3.0-rc.1
+
+- Adds debounced BOOT tap-and-hold SOS and cancellation, external red/green outputs, and named GPS alert screens.
+- Adds passive peer alerts, durable confirmed clear handling and typed Base acknowledgements.
+- Introduces wire v3 and reads stored Base records from v2.
+
 ## v0.2.0-rc.1
 
 - Adds separate Base, Relay Node and Rover images with runtime IDs and fixed direct or single-node routes.

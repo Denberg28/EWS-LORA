@@ -27,7 +27,7 @@
 namespace {
 using namespace ews;
 
-constexpr int ButtonPin = 21;
+constexpr int ServicePin = 21;
 constexpr int LedPin = 37;
 constexpr uint32_t AckWindowMs = RelayWindowMs;
 constexpr uint32_t BaseTxGapMs = 18000;
@@ -56,8 +56,15 @@ bool screenReady = false;
 uint32_t radioAt = 0;
 
 #ifdef EWS_ROVER
+constexpr int BootPin = 0;
+constexpr int RedPin = 10;
+constexpr int GreenPin = 43;
 TinyGPSPlus gps;
-HoldButton button;
+SosButton button;
+RoverName localName{};
+Report lastIncident;
+bool clearedNotice = false;
+uint32_t clearedAt = 0;
 Mode mode = Mode::Idle;
 uint32_t reservedThrough = 0;
 uint32_t nextSequence = 0;
@@ -76,13 +83,18 @@ bool lastAttemptAcked = false;
 Relay relay;
 uint32_t forwardedCount = 0;
 #else
+bool ackSent = false;
+uint32_t ackSentAt = 0;
+#endif
+
+#ifndef EWS_NODE
 struct RoverRecord {
     Report report;
     bool restored = false;
 };
 RoverRecord records[MaxRovers];
-bool ackSent = false;
-uint32_t ackSentAt = 0;
+Report clearedReport;
+uint32_t receivedClearAt = 0;
 #endif
 
 void row(uint8_t y, const char* text) {
@@ -156,6 +168,28 @@ void provision() {
             continue;
         }
         line[size] = '\0';
+#ifdef EWS_ROVER
+        if (provisioned) {
+            RoverName next{};
+            const bool valid = !overflow && std::strncmp(line, "NAME ", 5) == 0 &&
+                               parseName(line + 5, next) && next[0];
+            memset(line, 0, sizeof(line));
+            size = 0;
+            overflow = false;
+            if (!valid) {
+                Serial.println("INVALID CONFIG");
+                continue;
+            }
+            if (store.putBytes("name", next.data(), next.size()) != next.size()) {
+                setStoreFault();
+                return;
+            }
+            provisionEnabled = false;
+            localName = next;
+            Serial.println("NAME STORED - RESET BOARD");
+            return;
+        }
+#endif
         Identity config;
         const bool valid = !overflow && size == 74 && parseConfig(line, DeviceRole, config, key);
         memset(line, 0, sizeof(line));
@@ -212,11 +246,7 @@ void initRadio(uint32_t now) {
         radioFault(status);
         return;
     }
-#ifdef EWS_ROVER
-    radioReady = true;
-#else
     radioReady = listen();
-#endif
     if (radioReady) {
         Serial.println("RADIO READY");
     }
@@ -232,7 +262,8 @@ bool receive(Message& message) {
         valid = radio.readData(frame.data(), frame.size()) == RADIOLIB_ERR_NONE &&
                 decode(key, frame.data(), frame.size(), message);
     }
-    return listen() && valid;
+    listen();
+    return valid;
 }
 
 bool transmit(const Message& message) {
@@ -249,6 +280,133 @@ bool transmit(const Message& message) {
     return true;
 }
 
+#ifndef EWS_NODE
+void reportKey(uint8_t rover, char (&out)[5]) {
+    snprintf(out, sizeof(out), "r%u", rover);
+}
+
+const char* roverLabel(const Report& report, char (&fallback)[9]) {
+    if (report.name[0]) {
+        return report.name.data();
+    }
+    snprintf(fallback, sizeof(fallback), "ROVER %u", report.rover);
+    return fallback;
+}
+
+void logReport(const char* action, const Report& report) {
+    char fallback[9];
+    Serial.printf("name=%s ", roverLabel(report, fallback));
+    Serial.printf("%s %s rover=%u route=%u seq=%lu", action,
+                  report.kind == Kind::Sos ? "SOS" : "CLEAR", report.rover, report.route,
+                  static_cast<unsigned long>(report.sequence));
+    if (report.fix) {
+        Serial.printf(" lat=%.5f lon=%.5f", report.latitude / 100000.0, report.longitude / 100000.0);
+    } else if (report.kind == Kind::Sos) {
+        Serial.print(" NO GPS FIX");
+    }
+    Serial.println();
+}
+
+void loadRecords() {
+    for (uint8_t id = 1; id <= MaxRovers; ++id) {
+        char storageKey[5];
+        reportKey(id, storageKey);
+        if (!store.isKey(storageKey)) {
+            continue;
+        }
+        auto& record = records[id - 1];
+        ReportBytes bytes;
+        const size_t length = store.getBytesLength(storageKey);
+        if ((length != bytes.size() && length != LegacyReportSize) ||
+            store.getBytes(storageKey, bytes.data(), length) != length ||
+            !decodeStoredReport(bytes.data(), length, record.report) || isAck(record.report.kind) ||
+            record.report.rover != id) {
+            setStoreFault();
+            return;
+        }
+        record.restored = true;
+        logReport("RESTORED", record.report);
+    }
+}
+
+Arrival recordReport(const Report& incoming, uint32_t now) {
+    auto& record = records[incoming.rover - 1];  // Verified wire decode bounds the ID.
+    const Arrival arrival = classify(incoming, record.report);
+    if (arrival != Arrival::New) {
+        return arrival;
+    }
+    char storageKey[5];
+    reportKey(incoming.rover, storageKey);
+    const auto bytes = encodeReport(incoming);
+    if (store.putBytes(storageKey, bytes.data(), bytes.size()) != bytes.size()) {
+        setStoreFault();
+        return Arrival::Reject;
+    }
+    record.report = incoming;
+    record.restored = false;
+    if (incoming.kind == Kind::Clear) {
+        clearedReport = incoming;
+        receivedClearAt = now;
+    }
+    logReport("RECEIVED", incoming);
+    return Arrival::New;
+}
+
+void showPosition(const Report& report) {
+    char line[17];
+    if (report.fix) {
+        snprintf(line, sizeof(line), "LAT %+.5f", report.latitude / 100000.0);
+        row(4, line);
+        snprintf(line, sizeof(line), "LON %+.5f", report.longitude / 100000.0);
+        row(5, line);
+    } else {
+        row(4, "NO GPS FIX");
+        row(5, "");
+    }
+}
+
+void showClearNotice(uint32_t now) {
+    char line[17] = "";
+    char fallback[9];
+    if (clearedReport.sequence && !elapsed(now, receivedClearAt, 8000)) {
+        snprintf(line, sizeof(line), "CLEAR %s", roverLabel(clearedReport, fallback));
+    }
+    row(1, line);
+}
+
+bool showPeerOrBaseAlert(uint32_t now) {
+    const RoverRecord* active[MaxRovers];
+    unsigned count = 0;
+    for (const auto& record : records) {
+        if (record.report.sequence && record.report.kind == Kind::Sos) {
+            active[count++] = &record;
+        }
+    }
+    if (!count) {
+        return false;
+    }
+#ifdef EWS_ROVER
+    const unsigned page = (now / 3000) % (count + 1);
+    if (!page) {
+        return false;
+    }
+    const auto& record = *active[page - 1];
+#else
+    const unsigned page = (now / 3000) % count + 1;
+    const auto& record = *active[page - 1];
+#endif
+    char line[17];
+    char fallback[9];
+    snprintf(line, sizeof(line), "SOS %s", roverLabel(record.report, fallback));
+    row(2, line);
+    snprintf(line, sizeof(line), "R%u  SOS %u/%u", record.report.rover, page, count);
+    row(3, line);
+    showPosition(record.report);
+    row(6, record.restored ? "RESTORED RECORD" : "LAST REPORTED");
+    return true;
+}
+#endif
+
 #ifdef EWS_ROVER
 bool saveBeacon(Mode nextMode, uint32_t limit) {
     uint8_t bytes[5] = {static_cast<uint8_t>(nextMode)};
@@ -263,6 +421,16 @@ bool saveBeacon(Mode nextMode, uint32_t limit) {
 }
 
 void loadRole() {
+    loadRecords();
+    if (store.isKey("name")) {
+        RoverName raw{};
+        if (store.getBytesLength("name") != raw.size() ||
+            store.getBytes("name", raw.data(), raw.size()) != raw.size() || raw.back() ||
+            !parseName(raw.data(), localName) || raw != localName) {
+            setStoreFault();
+            return;
+        }
+    }
     if (!store.isKey("tx-v1")) {
         return;
     }
@@ -330,31 +498,43 @@ void updateGps(uint32_t now) {
 
 void runRole(uint32_t now) {
     updateGps(now);
-    if (button.update(digitalRead(ButtonPin) == LOW, now, mode == Mode::Sos ? 5000 : 2000)) {
+    if (button.update(digitalRead(BootPin) == LOW, now, mode == Mode::Sos ? 3000 : 2000)) {
         if (setMode(mode == Mode::Sos ? Mode::Clear : Mode::Sos)) {
+            if (mode == Mode::Sos) {
+                lastIncident = Report{};
+                clearedNotice = false;
+            }
             Serial.println(mode == Mode::Sos ? "SOS LATCHED" : "CLEAR PENDING");
         }
     }
-    if (!radioReady || mode == Mode::Idle) {
+    if (!radioReady || storeFault) {
         return;
     }
-    if (waitingAck) {
-        if (elapsed(now, sentAt, AckWindowMs)) {
+    if (waitingAck && elapsed(now, sentAt, AckWindowMs)) {
+        waitingAck = false;
+        lastAttemptAcked = false;
+        recentAck = false;
+    }
+    const bool expectingAck = waitingAck;
+    Message incoming;
+    if (receive(incoming)) {
+        if (expectingAck && matchesAck(incoming, sent)) {
             waitingAck = false;
-            lastAttemptAcked = false;
-            recentAck = false;
-        } else {
-            Message ack;
-            if (receive(ack) && matchesAck(ack, sent)) {
-                waitingAck = false;
-                recentAck = true;
-                lastAttemptAcked = true;
-                Serial.printf("RX ACK %lu\n", static_cast<unsigned long>(sent.report.sequence));
-                if (mode == Mode::Clear) {
-                    setMode(Mode::Idle);
-                }
+            recentAck = true;
+            lastAttemptAcked = true;
+            Serial.printf("RX ACK %lu\n", static_cast<unsigned long>(sent.report.sequence));
+            if (mode == Mode::Clear && setMode(Mode::Idle)) {
+                clearedNotice = true;
+                clearedAt = millis();
             }
+            return;
         }
+        Report peer;
+        if (peerReport(incoming, identity.id, peer)) {
+            recordReport(peer, now);
+        }
+    }
+    if (waitingAck || mode == Mode::Idle || !radioReady || storeFault) {
         return;
     }
     const uint32_t retryMs = identity.route ? 40000 : 20000;
@@ -364,14 +544,19 @@ void runRole(uint32_t now) {
     }
 
     Report report;
+    report.name = localName;
     report.rover = identity.id;
     report.route = identity.route;
     report.kind = mode == Mode::Sos ? Kind::Sos : Kind::Clear;
     report.sequence = sent.report.sequence;
-    report.fix = mode == Mode::Sos && fixValid;
-    if (report.fix) {
+    if (mode == Mode::Sos && fixValid) {
+        report.fix = true;
         report.latitude = latitude;
         report.longitude = longitude;
+    } else if (mode == Mode::Clear && lastIncident.fix) {
+        report.fix = true;
+        report.latitude = lastIncident.latitude;
+        report.longitude = lastIncident.longitude;
     }
     if ((!report.sequence || encodeReport(report) != encodeReport(sent.report)) &&
         !nextReport(report)) {
@@ -388,44 +573,75 @@ void runRole(uint32_t now) {
     jitterMs = static_cast<uint32_t>(sent.nonce % 8000);
     sentAt = millis();
     sentOnce = true;
-    if (transmit(sent) && listen()) {
-        waitingAck = true;
+    if (transmit(sent)) {
+        if (mode == Mode::Sos && report.fix) {
+            lastIncident = report;
+        }
+        waitingAck = listen();
         Serial.printf("TX %s %lu %s\n", mode == Mode::Sos ? "SOS" : "CLEAR",
                       static_cast<unsigned long>(report.sequence), report.fix ? "FIX" : "NO FIX");
     }
 }
 
 void roleDisplay(uint32_t now) {
-    row(2, mode == Mode::Idle ? "READY" : mode == Mode::Sos ? "SOS ACTIVE" : "CLEAR PENDING");
-    row(3, mode == Mode::Idle ? "HOLD 2s FOR SOS" : recentAck ? "RX ACK SEEN" : "WAIT ACK");
-    row(4, fixValid ? "GPS FIX" : "NO GPS FIX");
-    row(5, mode == Mode::Sos ? "HOLD 5s: CLEAR" : mode == Mode::Clear ? "HOLD 2s: SOS" : "");
-    char line[17];
-    if (identity.route) {
-        snprintf(line, sizeof(line), "ID %u / NODE %u", identity.id, identity.route);
-    } else {
-        snprintf(line, sizeof(line), "ID %u / DIRECT", identity.id);
+    showClearNotice(now);
+    if (mode == Mode::Idle && showPeerOrBaseAlert(now)) {
+        return;
     }
-    row(6, line);
-    digitalWrite(LedPin, mode != Mode::Idle && (recentAck || (now / 250) % 2));
+    Report position;
+    position.name = localName;
+    position.rover = identity.id;
+    const bool justCleared = clearedNotice && !elapsed(now, clearedAt, 8000);
+    if ((mode == Mode::Clear || justCleared) && lastIncident.fix) {
+        position.fix = true;
+        position.latitude = lastIncident.latitude;
+        position.longitude = lastIncident.longitude;
+    } else if (mode == Mode::Sos && sent.report.sequence) {
+        position.fix = sent.report.fix;
+        position.latitude = sent.report.latitude;
+        position.longitude = sent.report.longitude;
+    } else if (mode != Mode::Clear && !justCleared && fixValid) {
+        position.fix = true;
+        position.latitude = latitude;
+        position.longitude = longitude;
+    }
+    char fallback[9];
+    char title[17];
+    snprintf(title, sizeof(title), mode == Mode::Idle ? "%s" : "SOS %s",
+             roverLabel(position, fallback));
+    row(2, title);
+    row(3, mode == Mode::Clear ? "CANCEL PENDING" : mode == Mode::Sos ?
+           (recentAck ? "BASE RECEIVED" : "WAITING FOR BASE") : justCleared ? "SOS CLEARED" : "READY");
+    showPosition(position);
+    row(6, mode == Mode::Sos ? "TAP+HOLD 3s CLR" : "TAP+HOLD 2s SOS");
+}
+
+void updateRoverLeds(uint32_t now) {
+    const bool enabled = provisioned && !provisionEnabled;
+    const bool distress = enabled && mode != Mode::Idle;
+    const bool red = distress && now % 250 < 125;
+    const bool green = enabled && mode == Mode::Idle && radioReady && !storeFault;
+    digitalWrite(RedPin, red);
+    digitalWrite(GreenPin, green);
+    digitalWrite(LedPin, distress ? red : (storeFault || (enabled && !radioReady)) && now % 1000 < 100);
 }
 #elif defined(EWS_NODE)
 void loadRole() {}
 
 void runRole(uint32_t now) {
     Message message;
-    if (!radioReady || !receive(message)) {
+    if (!radioReady || !receive(message) || !radioReady) {
         return;
     }
-    const bool isAck = message.report.kind == Kind::Ack;
-    if (!(isAck ? relay.downlink(message, now) : relay.uplink(message, identity.id, now))) {
+    const bool acknowledgment = isAck(message.report.kind);
+    if (!(acknowledgment ? relay.downlink(message, now) : relay.uplink(message, identity.id, now))) {
         return;
     }
     delay(100);  // Let the previous sender turn around before a relay transmission.
     if (transmit(message)) {
         ++forwardedCount;
         listen();
-        Serial.printf("FORWARDED %s rover=%u seq=%lu\n", isAck ? "ACK" : "REPORT",
+        Serial.printf("FORWARDED %s rover=%u seq=%lu\n", acknowledgment ? "ACK" : "REPORT",
                       message.report.rover, static_cast<unsigned long>(message.report.sequence));
     }
 }
@@ -441,63 +657,15 @@ void roleDisplay(uint32_t now) {
     digitalWrite(LedPin, awaiting);
 }
 #else
-void reportKey(uint8_t rover, char (&out)[5]) {
-    snprintf(out, sizeof(out), "r%u", rover);
-}
-
-void logReport(const char* action, const Report& report) {
-    Serial.printf("%s %s rover=%u route=%u seq=%lu", action,
-                  report.kind == Kind::Sos ? "SOS" : "CLEAR", report.rover, report.route,
-                  static_cast<unsigned long>(report.sequence));
-    if (report.fix) {
-        Serial.printf(" lat=%.5f lon=%.5f", report.latitude / 100000.0, report.longitude / 100000.0);
-    } else if (report.kind == Kind::Sos) {
-        Serial.print(" NO GPS FIX");
-    }
-    Serial.println();
-}
-
-void loadRole() {
-    for (uint8_t id = 1; id <= MaxRovers; ++id) {
-        char storageKey[5];
-        reportKey(id, storageKey);
-        if (!store.isKey(storageKey)) {
-            continue;
-        }
-        auto& record = records[id - 1];
-        ReportBytes bytes;
-        if (store.getBytesLength(storageKey) != bytes.size() ||
-            store.getBytes(storageKey, bytes.data(), bytes.size()) != bytes.size() ||
-            !decodeReport(bytes.data(), record.report) || record.report.kind == Kind::Ack ||
-            record.report.rover != id) {
-            setStoreFault();
-            return;
-        }
-        record.restored = true;
-        logReport("RESTORED", record.report);
-    }
-}
+void loadRole() { loadRecords(); }
 
 void runRole(uint32_t now) {
     Message request;
     if (!radioReady || !receive(request) || !acceptsAtBase(request)) {
         return;
     }
-    auto& record = records[request.report.rover - 1];  // decode validates the ID.
-    const Arrival arrival = classify(request.report, record.report);
-    if (arrival == Arrival::Reject) {
+    if (recordReport(request.report, now) == Arrival::Reject || !radioReady) {
         return;
-    }
-    if (arrival == Arrival::New) {
-        char storageKey[5];
-        reportKey(request.report.rover, storageKey);
-        const auto bytes = encodeReport(request.report);
-        if (store.putBytes(storageKey, bytes.data(), bytes.size()) != bytes.size()) {
-            setStoreFault();
-            return;
-        }
-        record.report = request.report;
-        record.restored = false;
     }
     if (!ackSent || elapsed(now, ackSentAt, BaseTxGapMs)) {
         delay(100);
@@ -507,47 +675,19 @@ void runRole(uint32_t now) {
             listen();
         }
     }
-    if (arrival == Arrival::New) {
-        logReport("RECEIVED", record.report);
-    }
 }
 
 void roleDisplay(uint32_t now) {
-    const RoverRecord* active[MaxRovers];
-    uint8_t count = 0;
-    for (const auto& record : records) {
-        if (record.report.sequence && record.report.kind == Kind::Sos) {
-            active[count++] = &record;
-        }
-    }
-    if (!count) {
+    showClearNotice(now);
+    const bool active = showPeerOrBaseAlert(now);
+    if (!active) {
         row(2, "LISTENING");
         row(3, "NO ACTIVE SOS");
         row(4, "");
         row(5, "");
         row(6, "");
-        digitalWrite(LedPin, LOW);
-        return;
     }
-
-    const auto& record = *active[(now / 3500) % count];
-    char line[17];
-    snprintf(line, sizeof(line), "SOS R%u (%u TOTAL)", record.report.rover, count);
-    row(2, line);
-    row(3, record.restored ? "RESTORED RECORD" : "LAST REPORTED");
-    if (record.report.fix) {
-        snprintf(line, sizeof(line), "LAT %+.5f", record.report.latitude / 100000.0);
-        row(4, line);
-        snprintf(line, sizeof(line), "LON %+.5f", record.report.longitude / 100000.0);
-        row(5, line);
-    } else {
-        row(4, "NO GPS FIX");
-        row(5, "");
-    }
-    snprintf(line, sizeof(line), record.report.route ? "VIA NODE %u" : "DIRECT LINK",
-             record.report.route);
-    row(6, line);
-    digitalWrite(LedPin, (now / 250) % 2);
+    digitalWrite(LedPin, active && (now / 250) % 2);
 }
 #endif
 
@@ -557,29 +697,40 @@ void updateDisplay(uint32_t now) {
         return;
     }
     lastDraw = now;
-    if (storeFault || !provisioned) {
-        row(2, storeFault ? "STORE ERROR" : "CONFIG NEEDED");
+    if (storeFault || !provisioned || provisionEnabled) {
+        row(2, storeFault ? "STORE ERROR" : provisioned ? "ROVER NAME" : "CONFIG NEEDED");
         row(3, storeFault ? "RADIO DISABLED" : provisionEnabled ? "USB CONFIG MODE" : "RESET TO START");
         row(4, "");
         row(5, "");
         row(6, "");
+#ifndef EWS_ROVER
         digitalWrite(LedPin, storeFault && now % 1000 < 100);
+#endif
         return;
     }
     roleDisplay(now);
     row(7, radioReady ? "" : "RADIO ERROR");
+#ifndef EWS_ROVER
     if (!radioReady) {
         digitalWrite(LedPin, now % 1000 < 100);
     }
+#endif
 }
 }  // namespace
 
 void setup() {
-    pinMode(ButtonPin, INPUT_PULLUP);
+    pinMode(ServicePin, INPUT_PULLUP);
+#ifdef EWS_ROVER
+    pinMode(BootPin, INPUT_PULLUP);
+    pinMode(RedPin, OUTPUT);
+    pinMode(GreenPin, OUTPUT);
+    digitalWrite(RedPin, LOW);
+    digitalWrite(GreenPin, LOW);
+#endif
     pinMode(LedPin, OUTPUT);
     digitalWrite(LedPin, LOW);
     delay(40);
-    const bool serviceRequested = digitalRead(ButtonPin) == LOW;
+    const bool serviceRequested = digitalRead(ServicePin) == LOW;
     Serial.begin(115200);
     // Arduino-ESP32 2.0.x / ESP-IDF 4.4 watchdog API.
     const esp_err_t watchdog = esp_task_wdt_init(8, true);
@@ -614,6 +765,9 @@ void setup() {
     provisioned = loadConfig();
     if (provisioned) {
         loadRole();
+#ifdef EWS_ROVER
+        provisionEnabled = serviceRequested && !storeFault && mode == Mode::Idle;
+#endif
     } else {
         provisionEnabled = serviceRequested && !storeFault;
     }
@@ -624,12 +778,15 @@ void loop() {
         esp_task_wdt_reset();
     }
     const uint32_t now = millis();
-    if (!storeFault && provisioned) {
+    if (!storeFault && provisionEnabled) {
+        provision();
+    } else if (!storeFault && provisioned) {
         initRadio(now);
         runRole(millis());
-    } else if (!storeFault && provisionEnabled) {
-        provision();
     }
+#ifdef EWS_ROVER
+    updateRoverLeds(millis());
+#endif
     updateDisplay(millis());
     delay(5);
 }

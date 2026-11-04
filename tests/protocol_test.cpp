@@ -25,21 +25,30 @@ int main() {
     Message sos;
     sos.report.sequence = 1;
     sos.report.rover = 1;
+    assert(parseName("ALPHA-1", sos.report.name));
     sos.nonce = UINT64_C(0x1122334455667788);
     Frame wire;
     assert(encode(key, sos, wire));
     const Frame golden = {{
-        0x45, 0x57, 0x02, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00,
-        0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, 0xc7, 0x8c,
-        0x44, 0xc9, 0xb4, 0x4b, 0x42, 0x6b, 0xc4, 0xe9, 0xc8, 0xed,
-        0xba, 0xff, 0x1c, 0x65
+        0x45, 0x57, 0x03, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x41,
+        0x4c, 0x50, 0x48, 0x41, 0x2d, 0x31, 0x00, 0x00, 0x88, 0x77,
+        0x66, 0x55, 0x44, 0x33, 0x22, 0x11, 0xbd, 0x7b, 0x87, 0x45,
+        0x6d, 0x91, 0x85, 0x69, 0x01, 0x4e, 0x11, 0x17, 0x7d, 0x81,
+        0xb8, 0x98
     }};
     assert(wire == golden);
 
     Message received;
     assert(decode(key, wire.data(), wire.size(), received));
     assert(received.nonce == sos.nonce && received.report.kind == Kind::Sos && !received.report.fix);
+    assert(received.report.name == sos.report.name);
+    RoverName invalidName{};
+    assert(!parseName("ALPHA-TOO", invalidName));
+    assert(!parseName("Alpha", invalidName));
+    auto invalid = sos;
+    invalid.report.name[1] = 0;  // Reject bytes hidden beyond the first NUL.
+    assert(!encode(key, invalid, wire));
     assert(!decode(key, wire.data(), wire.size() - 1, received));
     assert(!decode(key, wire.data(), wire.size() + 1, received));
     Key wrong = key;
@@ -99,6 +108,27 @@ int main() {
     assert(decodeReport(nvs.data(), afterReset));
     assert(classify(sos.report, afterReset) == Arrival::Reject);
     assert(classify(clear.report, afterReset) == Arrival::Duplicate);
+    auto legacy = nvs;
+    legacy[2] = 2;
+    Report fromV2;
+    assert(decodeStoredReport(legacy.data(), LegacyReportSize, fromV2));
+    assert(fromV2.kind == Kind::Clear && fromV2.sequence == clear.report.sequence && !fromV2.name[0]);
+    assert(!decodeStoredReport(legacy.data(), LegacyReportSize - 1, fromV2));
+
+    Report peer;
+    assert(peerReport(sos, 2, peer));
+    assert(!peerReport(sos, 1, peer));
+    assert(!peerReport(clear, 2, peer));  // An unconfirmed cancellation cannot clear a peer.
+    const auto clearAck = makeAck(clear);
+    assert(clearAck.report.kind == Kind::ClearAck);
+    assert(!acceptsAtBase(clearAck));
+    assert(matchesAck(clearAck, clear));
+    auto wrongKind = clearAck;
+    wrongKind.report.kind = Kind::Ack;
+    assert(!matchesAck(wrongKind, clear));
+    assert(peerReport(clearAck, 2, peer) && peer.kind == Kind::Clear);
+    assert(classify(peer, receiverState) == Arrival::New);
+    assert(classify(sos.report, peer) == Arrival::Reject);
 
     Message other = clear;
     other.report.rover = 2;
@@ -149,26 +179,41 @@ int main() {
     assert(!reserveSequenceBlock(5, next, limit));
     assert(!reserveSequenceBlock(UINT32_MAX - 255, next, limit));
 
-    HoldButton heldAtBoot;
-    assert(!heldAtBoot.update(true, 0, 2000));
-    assert(!heldAtBoot.update(true, 30, 2000));
-    assert(!heldAtBoot.update(true, 9000, 2000));
-    assert(!heldAtBoot.update(false, 9001, 2000));
-    assert(!heldAtBoot.update(false, 9031, 2000));
-    assert(!heldAtBoot.update(true, 9100, 2000));
-    assert(!heldAtBoot.update(false, 9110, 2000));
-    assert(!heldAtBoot.update(true, 9120, 2000));
-    assert(!heldAtBoot.update(true, 9150, 2000));
-    assert(!heldAtBoot.update(true, 11149, 2000));
-    assert(heldAtBoot.update(true, 11150, 2000));
-    assert(!heldAtBoot.update(true, 20000, 5000));
+    SosButton button;
+    assert(!button.update(true, 0, 2000));
+    assert(!button.update(true, 30, 2000));
+    assert(!button.update(true, 9000, 2000));
+    assert(!button.update(false, 9010, 2000));
+    assert(!button.update(false, 9040, 2000));
 
-    HoldButton clearButton;
-    const uint32_t edge = UINT32_MAX - 100;
-    assert(!clearButton.update(false, edge - 1, 5000));
-    assert(!clearButton.update(true, edge, 5000));
-    assert(!clearButton.update(true, edge + 30, 5000));
-    assert(!clearButton.update(true, edge + 5029, 5000));
-    assert(clearButton.update(true, edge + 5030, 5000));
+    const auto edge = [&button](bool pressed, uint32_t now, uint32_t hold) {
+        assert(!button.update(pressed, now, hold));
+        assert(!button.update(pressed, now + 30, hold));
+    };
+    edge(true, 9100, 2000);
+    assert(!button.update(true, 12000, 2000)); // Single long hold.
+    edge(false, 12010, 2000);
+    edge(true, 12100, 2000);
+    edge(false, 12200, 2000);
+    edge(true, 13300, 2000);
+    assert(!button.update(true, 16000, 2000)); // Late second press.
+    edge(false, 16010, 2000);
+
+    assert(!button.update(true, 16100, 2000));
+    assert(!button.update(false, 16110, 2000)); // Contact bounce.
+    edge(true, 16120, 2000);
+    edge(false, 16220, 2000);
+    edge(true, 16400, 2000);
+    assert(!button.update(true, 18429, 2000));
+    assert(button.update(true, 18430, 2000));
+    assert(!button.update(true, 23000, 3000)); // Release required.
+    edge(false, 23010, 3000);
+
+    const uint32_t wrap = UINT32_MAX - 250;
+    edge(true, wrap, 3000);
+    edge(false, wrap + 100, 3000);
+    edge(true, wrap + 220, 3000);
+    assert(!button.update(true, wrap + 3249, 3000));
+    assert(button.update(true, wrap + 3250, 3000));
     std::cout << "PASS: protocol, authenticated round trip, fleet routing, replay handling, state, and button\n";
 }
