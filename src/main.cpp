@@ -58,10 +58,11 @@ uint32_t radioAt = 0;
 #ifdef EWS_ROVER
 constexpr int BootPin = 0;
 constexpr int RedPin = 10;
-constexpr int GreenPin = 43;
+constexpr int GreenPin = 16;
 TinyGPSPlus gps;
 SosButton button;
 RoverName localName{};
+bool peerStoreFault = false;
 Report lastIncident;
 bool clearedNotice = false;
 uint32_t clearedAt = 0;
@@ -307,6 +308,15 @@ void logReport(const char* action, const Report& report) {
     Serial.println();
 }
 
+void recordStoreFault() {
+#ifdef EWS_ROVER
+    peerStoreFault = true;
+    Serial.println("PEER STORE ERROR");
+#else
+    setStoreFault();
+#endif
+}
+
 void loadRecords() {
     for (uint8_t id = 1; id <= MaxRovers; ++id) {
         char storageKey[5];
@@ -321,7 +331,7 @@ void loadRecords() {
             store.getBytes(storageKey, bytes.data(), length) != length ||
             !decodeStoredReport(bytes.data(), length, record.report) || isAck(record.report.kind) ||
             record.report.rover != id) {
-            setStoreFault();
+            recordStoreFault();
             return;
         }
         record.restored = true;
@@ -339,7 +349,7 @@ Arrival recordReport(const Report& incoming, uint32_t now) {
     reportKey(incoming.rover, storageKey);
     const auto bytes = encodeReport(incoming);
     if (store.putBytes(storageKey, bytes.data(), bytes.size()) != bytes.size()) {
-        setStoreFault();
+        recordStoreFault();
         return Arrival::Reject;
     }
     record.report = incoming;
@@ -348,7 +358,6 @@ Arrival recordReport(const Report& incoming, uint32_t now) {
         clearedReport = incoming;
         receivedClearAt = now;
     }
-    logReport("RECEIVED", incoming);
     return Arrival::New;
 }
 
@@ -530,8 +539,9 @@ void runRole(uint32_t now) {
             return;
         }
         Report peer;
-        if (peerReport(incoming, identity.id, peer)) {
-            recordReport(peer, now);
+        if (!peerStoreFault && peerReport(incoming, identity.id, peer) &&
+            recordReport(peer, now) == Arrival::New) {
+            logReport("RECEIVED", peer);
         }
     }
     if (waitingAck || mode == Mode::Idle || !radioReady || storeFault) {
@@ -585,13 +595,13 @@ void runRole(uint32_t now) {
 
 void roleDisplay(uint32_t now) {
     showClearNotice(now);
-    if (mode == Mode::Idle && showPeerOrBaseAlert(now)) {
+    const bool justCleared = clearedNotice && !elapsed(now, clearedAt, 8000);
+    if (mode == Mode::Idle && !justCleared && !peerStoreFault && showPeerOrBaseAlert(now)) {
         return;
     }
     Report position;
     position.name = localName;
     position.rover = identity.id;
-    const bool justCleared = clearedNotice && !elapsed(now, clearedAt, 8000);
     if ((mode == Mode::Clear || justCleared) && lastIncident.fix) {
         position.fix = true;
         position.latitude = lastIncident.latitude;
@@ -630,7 +640,10 @@ void loadRole() {}
 
 void runRole(uint32_t now) {
     Message message;
-    if (!radioReady || !receive(message) || !radioReady) {
+    if (!radioReady) {
+        return;
+    }
+    if (!receive(message) || !radioReady) {
         return;
     }
     const bool acknowledgment = isAck(message.report.kind);
@@ -664,16 +677,20 @@ void runRole(uint32_t now) {
     if (!radioReady || !receive(request) || !acceptsAtBase(request)) {
         return;
     }
-    if (recordReport(request.report, now) == Arrival::Reject || !radioReady) {
+    const Arrival arrival = recordReport(request.report, now);
+    if (arrival == Arrival::Reject) {
         return;
     }
-    if (!ackSent || elapsed(now, ackSentAt, BaseTxGapMs)) {
+    if (radioReady && (!ackSent || elapsed(now, ackSentAt, BaseTxGapMs))) {
         delay(100);
         ackSentAt = millis();
         ackSent = true;
         if (transmit(makeAck(request))) {
             listen();
         }
+    }
+    if (arrival == Arrival::New) {
+        logReport("RECEIVED", request.report);
     }
 }
 
@@ -709,8 +726,10 @@ void updateDisplay(uint32_t now) {
         return;
     }
     roleDisplay(now);
+#ifdef EWS_ROVER
+    row(7, !radioReady ? "RADIO ERROR" : peerStoreFault ? "PEER STORE ERROR" : "");
+#else
     row(7, radioReady ? "" : "RADIO ERROR");
-#ifndef EWS_ROVER
     if (!radioReady) {
         digitalWrite(LedPin, now % 1000 < 100);
     }

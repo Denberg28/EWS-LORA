@@ -10,7 +10,7 @@ Baseline: v0.2.0-rc.1 at ee7d7d8ba2b85b2ee5624606c0cfcc853fd51c02, a software-ve
 | New or expired fix | Update on next report; fixes expire after 10 s | Forward validated report | Show last reported coordinates or NO GPS FIX |
 | Reboot | Resume active SOS/CLEAR and reserve a higher sequence block | Listen again and await Rover retry | Restore per-rover records and mark them restored |
 | I/O fault | Retain alert and retry radio setup | Retry radio setup | Retain saved events and retry radio setup |
-| Storage fault | Show STORE ERROR and disable RF | Disable RF if config storage fails | Fail closed and avoid ACKing failed writes |
+| Storage fault | Show STORE ERROR and disable RF if local SOS/config storage fails. A peer-only record fault disables peer logging while preserving local SOS | Disable RF if config storage fails | Fail closed and avoid ACKing failed writes |
 
 A fresh tap-and-hold for two seconds during pending CLEAR starts a new SOS. The debounced gesture requires a short tap, then a second press within one second. Each gesture fires once per release. GPIO0 held at reset enters the ROM bootloader. An already-held runtime input must be released before arming. GPIO21 is reserved for USB configuration. Local users control SOS and clear. Only the Base issues an ACK. The firmware has no actuators or motion authority. The loop task uses an 8-second watchdog, bounded RadioLib packet TX, and debounced button handling.
 
